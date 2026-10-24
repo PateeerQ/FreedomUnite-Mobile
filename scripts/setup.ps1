@@ -187,7 +187,11 @@ foreach ($bin in Get-ChildItem $ovlSrc -Filter *.bin | Sort-Object Name) {
     $tag = "ov$hash"
     $dir = Join-Path $ovlGen $tag
     New-Item -ItemType Directory -Force $dir | Out-Null
-    & $tool emit $elf $dir $tag | Out-Null
+    # Functions only reached through a pointer built at run time, found from
+    # dispatch misses: seeds\ov<hash>.txt, one hex address per line.
+    $ovlSeeds = Join-Path $repo "seeds\$tag.txt"
+    if (Test-Path $ovlSeeds) { & $tool emit $elf $dir $tag --seeds $ovlSeeds | Out-Null }
+    else { & $tool emit $elf $dir $tag | Out-Null }
     if ($LASTEXITCODE) { throw "allegrexrecomp emit failed for $($bin.Name)" }
     Remove-Item $elf
     foreach ($f in Get-ChildItem $dir -File) {
