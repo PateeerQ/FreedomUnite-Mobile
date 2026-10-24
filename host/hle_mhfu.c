@@ -14,10 +14,12 @@
 #include <string.h>
 #include <time.h>
 
+#include "adhoc.h"
 #include "hle_mhfu.h"
 #include "overlays.h"
 
 #include "psprecomp/dispatch.h"
+#include "psprecomp/mem.h"
 
 /* ---- sceUmdUser ------------------------------------------------------------ */
 
@@ -96,6 +98,27 @@ static void hle_UtilityGetSystemParamInt(void) {
  * back or invalidating a range has nothing to do. */
 
 static void hle_CacheRange(void) { psp_ret(0); }
+
+/* (u32 core): the SAS mixer's output mode. 0, stereo: what psprecomp's SAS
+ * produces. */
+static void hle_SasGetOutputmode(void) { psp_ret(0); }
+
+/* ---- sceDmac ------------------------------------------------------------------
+ *
+ * (void *dst, const void *src, u32 size): a DMA copy, done at once. MHFU's
+ * stage code copies its objects with it; left unimplemented, the copies never
+ * happened and the village jumped through a vtable pointer that was never
+ * written (a dispatch miss into stage066's bss). */
+static void hle_DmacMemcpy(void) {
+    uint32_t dst = psp_arg(0), src = psp_arg(1), size = psp_arg(2);
+    void *d = size ? psp_mem_ptr(dst, size) : NULL;
+    const void *s = size ? psp_mem_ptr(src, size) : NULL;
+    if (getenv("MHFU_TRACE_DMAC"))
+        printf("dmac: 0x%08X <- 0x%08X, 0x%X bytes\n", dst, src, size);
+    if (size && (!d || !s)) { psp_ret(0x80000023u); return; }   /* SCE_KERNEL_ERROR_ILLEGAL_ADDR */
+    if (size) memmove(d, s, size);
+    psp_ret(0);
+}
 
 /* ---- ThreadManForUser: virtual timers ---------------------------------------
  *
@@ -203,6 +226,13 @@ static void vtimer_tick(void) {
         if (v->used && v->running && v->handler && vt_now(v) >= v->schedule)
             v->schedule = vt_now(v);
     }
+}
+
+/* Everything that runs "like an interrupt": timer handlers, then the ad hoc
+ * handlers for whatever the network did since the last tick. */
+static void host_tick(void) {
+    vtimer_tick();
+    mhfu_adhoc_tick();
 }
 
 /* (const char *name, SceKernelVTimerOptParam *opt) */
@@ -323,24 +353,8 @@ static void hle_RtcGetCurrentClockLocalTime(void) {
     psp_ret(0);
 }
 
-/* (u8 psid[16]): a fixed id. Games use it to tell consoles apart, e.g. in
- * ad hoc play; a real one is per device, which the Android port will need. */
-static void hle_OpenPSIDGetOpenPSID(void) {
-    static const uint8_t k_id[16] = { 'M','H','F','U','-','R','E','C','O','M','P',0,0,0,0,1 };
-    uint32_t at = psp_arg(0);
-    if (at) for (uint32_t i = 0; i < 16; i++) psp_write8(at + i, k_id[i]);
-    psp_ret(0);
-}
-
-/* (u8 mac[6]): the console's wireless MAC. MHFU reads it for ad hoc play;
- * a locally administered fixed address until the Android port has one per
- * device. */
-static void hle_WlanGetEtherAddr(void) {
-    static const uint8_t k_mac[6] = { 0x02, 'M', 'H', 'F', 'U', 0x01 };
-    uint32_t at = psp_arg(0);
-    if (at) for (uint32_t i = 0; i < 6; i++) psp_write8(at + i, k_mac[i]);
-    psp_ret(0);
-}
+/* sceOpenPSIDGetOpenPSID and sceWlanGetEtherAddr are in adhoc.c: both
+ * identify this device to other players, so they follow its ad hoc MAC. */
 
 /* ---- sceGe_user / SysMemUserForUser ---------------------------------------- */
 
@@ -500,6 +514,8 @@ void mhfu_hle_register(const char *overlay_dir) {
     psp_hle_register(0xA5DA2406, "sceUtility", "sceUtilityGetSystemParamInt",
                      hle_UtilityGetSystemParamInt);
 
+    psp_hle_register(0x617F3FE6, "sceDmac", "sceDmacMemcpy", hle_DmacMemcpy);
+    psp_hle_register(0xE175EF66, "sceSasCore", "__sceSasGetOutputmode", hle_SasGetOutputmode);
     psp_hle_register(0xBFA98062, "UtilsForUser", "sceKernelDcacheInvalidateRange",          hle_CacheRange);
     psp_hle_register(0x3EE30821, "UtilsForUser", "sceKernelDcacheWritebackRange",           hle_CacheRange);
     psp_hle_register(0x34B9FA9E, "UtilsForUser", "sceKernelDcacheWritebackInvalidateRange", hle_CacheRange);
@@ -524,7 +540,5 @@ void mhfu_hle_register(const char *overlay_dir) {
     psp_hle_register(0xE49BFE92, "sceUtility", "sceUtilityUnloadModule", hle_UtilityUnloadModule);
     psp_hle_register(0xB7F46618, "ModuleMgrForUser", "sceKernelLoadModuleByID", hle_LoadModuleByID);
     psp_hle_register(0xE7C27D1B, "sceRtc", "sceRtcGetCurrentClockLocalTime", hle_RtcGetCurrentClockLocalTime);
-    psp_hle_register(0xC69BEBCE, "sceOpenPSID", "sceOpenPSIDGetOpenPSID", hle_OpenPSIDGetOpenPSID);
-    psp_hle_register(0x0C622081, "sceWlanDrv", "sceWlanGetEtherAddr", hle_WlanGetEtherAddr);
-    psp_intr_set_host_tick(vtimer_tick);
+    psp_intr_set_host_tick(host_tick);
 }
