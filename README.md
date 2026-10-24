@@ -1,4 +1,4 @@
-# MHFU-Android
+# FreedomUniteRecompAndroid
 
 Monster Hunter Freedom Unite (PSP, EU `ULES01213`) statically recompiled to
 native code with [psprecomp](https://github.com/sp00nznet/psprecomp), on the
