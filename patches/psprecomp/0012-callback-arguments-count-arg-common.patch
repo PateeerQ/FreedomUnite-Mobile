@@ -1,0 +1,63 @@
+diff --git a/src/hle/threadman.c b/src/hle/threadman.c
+index da3ff2e..930c56c 100644
+--- a/src/hle/threadman.c
++++ b/src/hle/threadman.c
+@@ -1591,16 +1591,20 @@ static int deliver_callbacks(void) {
+             continue;
+         }
+ 
++        /* All pending notifications are delivered at once, as on hardware:
++         * the handler is int (*)(int count, int arg, void *common). */
++        uint32_t count = (uint32_t)c->notify_count;
+         uint32_t arg = c->notify_arg;
+-        c->notify_count--;
++        c->notify_count = 0;
+         c->notify_arg = 0;
+ 
+         /* A real callback does not disturb what it interrupted, so the whole
+          * register file is saved and restored around it -- the same contract as
+          * an interrupt handler, and the same one a thread body gets on entry. */
+         psp_cpu_state saved = psp_cpu;
+-        psp_cpu.r[PSP_REG_A0] = c->arg;      /* what the guest passed at create time */
+-        psp_cpu.r[PSP_REG_A1] = arg;         /* and what the notification carried */
++        psp_cpu.r[PSP_REG_A0] = count;       /* notifications since the last delivery */
++        psp_cpu.r[PSP_REG_A1] = arg;         /* what the last notification carried */
++        psp_cpu.r[PSP_REG_A2] = c->arg;      /* what the guest passed at create time */
+         psp_cpu.r[PSP_REG_RA] = 0;
+         psp_call_from_host(c->func);
+         c->delivery_status = (int32_t)psp_cpu.r[PSP_REG_V0];
+diff --git a/tests/test_hle.c b/tests/test_hle.c
+index 1961848..117ee2f 100644
+--- a/tests/test_hle.c
++++ b/tests/test_hle.c
+@@ -757,14 +757,15 @@ static void test_sub_interrupts(void) {
+           "a released handler is not called");
+ }
+ 
+-/* A callback, as the guest sees one: it is called with two arguments, and it
+- * must not disturb the thread it runs on. */
+-static uint32_t g_cb_arg, g_cb_notify;
++/* A callback, as the guest sees one: it is called as (count, arg, common),
++ * and it must not disturb the thread it runs on. */
++static uint32_t g_cb_arg, g_cb_notify, g_cb_count;
+ static int      g_cb_calls;
+ static void fake_callback(void) {
+     g_cb_calls++;
+-    g_cb_arg    = psp_cpu.r[PSP_REG_A0];
++    g_cb_count  = psp_cpu.r[PSP_REG_A0];
+     g_cb_notify = psp_cpu.r[PSP_REG_A1];
++    g_cb_arg    = psp_cpu.r[PSP_REG_A2];
+     psp_cpu.r[PSP_REG_S3] = 0xDEAD;    /* a register the interrupted code owns */
+     psp_cpu.r[PSP_REG_V0] = 0x42;      /* the delivery status the kernel keeps */
+ }
+@@ -818,8 +819,9 @@ static void test_callbacks(void) {
+     psp_cpu.r[PSP_REG_S3] = 0x5A5A5A5A;
+     CHECK(call(CHECK, 0, 0, 0, 0) == 1, "CheckCallback reports 1 when a callback ran");
+     CHECK(g_cb_calls == 1, "the callback ran once, got %d", g_cb_calls);
+-    CHECK(g_cb_arg == 0xAA, "first argument is the one CreateCallback was given, got 0x%X", g_cb_arg);
++    CHECK(g_cb_count == 1, "first argument is the notification count, got %u", g_cb_count);
+     CHECK(g_cb_notify == 0x77, "second argument is the one the notification carried, got 0x%X", g_cb_notify);
++    CHECK(g_cb_arg == 0xAA, "third argument is the one CreateCallback was given, got 0x%X", g_cb_arg);
+     CHECK(psp_cpu.r[PSP_REG_S3] == 0x5A5A5A5A, "a callback does not disturb the thread it runs on");
+ 
+     /* One delivery per notification. */

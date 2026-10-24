@@ -1,0 +1,55 @@
+diff --git a/tests/test_emit.c b/tests/test_emit.c
+index 81df755..e24bafa 100644
+--- a/tests/test_emit.c
++++ b/tests/test_emit.c
+@@ -1007,6 +1007,7 @@ int main(void) {
+         0xDFFF7C00u,   /* vfim v127, +Inf halfword       */
+         0xDF96FC00u,   /* vfim v22,  -Inf halfword       */
+         0xDF969B81u,   /* vfim v22,  -0.00366401672      */
++        0xDF81BC00u,   /* vfim v1,   -1.0 (whole number)  */
+         0x03E00008u,   /* jr $ra                         */
+         0x00000000u,
+     };
+@@ -1050,6 +1051,8 @@ int main(void) {
+                         "a -Inf halfword keeps its sign");
+         expect_contains(vsrc, "psp_vimm(22, -0.00366401672f);",
+                         "a finite halfword is emitted as before");
++        expect_contains(vsrc, "psp_vimm(1, -1.0f);",
++                        "a whole-number halfword keeps its point (\"-1f\" is not C)");
+         /* `%.9gf` glued the format's literal `f` onto printf's `nan` and `inf`
+          * output, giving these two invalid tokens. Neither may come back. */
+         CHECK(strstr(vsrc, "nanf") == NULL, "no invalid `nanf` token");
+diff --git a/tools/allegrexrecomp/emit.c b/tools/allegrexrecomp/emit.c
+index d4f3162..1ad599a 100644
+--- a/tools/allegrexrecomp/emit.c
++++ b/tools/allegrexrecomp/emit.c
+@@ -495,8 +495,14 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
+         if (isnan(v))      fprintf(f, "%spsp_vimm(%u, NAN);\n", ind, in->vd);
+         else if (isinf(v)) fprintf(f, "%spsp_vimm(%u, %sINFINITY);\n",
+                                    ind, in->vd, v < 0 ? "-" : "");
+-        else               fprintf(f, "%spsp_vimm(%u, %.9gf);\n",
+-                                   ind, in->vd, (double)v);
++        else {
++            /* %g drops the point from whole numbers ("-1"), and "-1f" is not
++             * a C literal: put the ".0" back before the suffix. */
++            char num[32];
++            snprintf(num, sizeof num, "%.9g", (double)v);
++            if (!strpbrk(num, ".e")) strcat(num, ".0");
++            fprintf(f, "%spsp_vimm(%u, %sf);\n", ind, in->vd, num);
++        }
+         return;
+     }
+ 
+@@ -555,6 +561,12 @@ static void branch_cond(char *buf, size_t n, const a_insn *in) {
+     case A_BGEZAL: case A_BGEZALL: snprintf(buf, n, "(int32_t)%s >= 0", rs); break;
+     case A_BC1T: case A_BC1TL: snprintf(buf, n, "psp_fpu_cond()"); break;
+     case A_BC1F: case A_BC1FL: snprintf(buf, n, "!psp_fpu_cond()"); break;
++    /* VFPU condition branches test one bit of the vcmp result: lanes 0-3,
++     * 4 = any, 5 = all. The bit index is the top three bits of the rt field. */
++    case A_BVT: case A_BVTL:
++        snprintf(buf, n, "((psp_cpu.vfpu_cc >> %u) & 1)", (in->raw >> 18) & 7); break;
++    case A_BVF: case A_BVFL:
++        snprintf(buf, n, "!((psp_cpu.vfpu_cc >> %u) & 1)", (in->raw >> 18) & 7); break;
+     default:                   snprintf(buf, n, "0 /* unhandled branch */"); break;
+     }
+ }

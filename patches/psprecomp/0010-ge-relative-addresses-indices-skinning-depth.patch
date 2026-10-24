@@ -1,0 +1,875 @@
+diff --git a/include/psprecomp/render.h b/include/psprecomp/render.h
+index f5a3425..8b2e84c 100644
+--- a/include/psprecomp/render.h
++++ b/include/psprecomp/render.h
+@@ -22,6 +22,10 @@ typedef struct {
+     int      x, y;
+     uint32_t rgba;
+     float    u, v;
++    /* Depth after the viewport (0-65535), and 1/w for perspective-correct
++     * texturing. A w of 0 means "no perspective": through-mode vertices and
++     * anything built without one interpolate affinely. */
++    float    z, w;
+ } psp_vertex;
+ 
+ /* GE primitive types, from the PRIM argument's type field. */
+@@ -78,6 +82,13 @@ typedef struct {
+     int      atest_func, atest_ref, atest_mask; /* ATST */
+ 
+     int      sc_x0, sc_y0, sc_x1, sc_y1;        /* SCISSOR1/2, inclusive */
++
++    int      clear_depth;    /* CLEAR bit 10: ...to the vertex depth */
++    int      ztest;          /* ZTE */
++    int      ztest_func;     /* ZTST */
++    int      zwrite;         /* !ZMSK */
++    uint32_t zb_addr;        /* ZBP + ZBW high byte, in eDRAM */
++    int      zb_stride;      /* ZBW */
+ } psp_draw_state;
+ 
+ typedef struct {
+@@ -113,6 +124,9 @@ extern const psp_render_backend psp_render_null;
+ 
+ /* Pixels written by the active backend -- the proof of life during bring-up. */
+ uint64_t psp_render_pixels(void);
++/* Fragments depth-tested, rejected by the test, and depth pixels cleared.
++ * PSPRECOMP_NO_DEPTH=1 disables the depth buffer. */
++void psp_render_depth_stats(uint64_t *tested, uint64_t *failed, uint64_t *cleared);
+ void     psp_render_reset_pixels(void);
+ 
+ /* One pixel in format 0-3 (565, 5551, 4444, 8888) as 0xAABBGGRR. The 16-bit
+diff --git a/src/hle/ge.c b/src/hle/ge.c
+index 775896a..65baebe 100644
+--- a/src/hle/ge.c
++++ b/src/hle/ge.c
+@@ -53,6 +53,16 @@
+ #define GE_OFFSET_ADDR  0x13
+ #define GE_ORIGIN_ADDR  0x14
+ #define GE_TME          0x1E
++#define GE_ZTE          0x23
++#define GE_BOFS         0x2A
++#define GE_BONE         0x2B
++#define GE_MW0          0x2C
++#define GE_ZSCALE       0x44
++#define GE_ZPOS         0x47
++#define GE_ZBP          0x9E
++#define GE_ZBW          0x9F
++#define GE_ZTST         0xDE
++#define GE_ZMSK         0xE7
+ #define GE_ABE          0x21
+ #define GE_ATE          0x22
+ #define GE_WMS          0x3A
+@@ -111,13 +121,14 @@ typedef struct {
+     uint32_t list;      /* current read pointer */
+     uint32_t stall;     /* stop before this address; 0 means "no stall" */
+     uint32_t base;      /* GE_BASE: high bits for addresses */
+-    uint32_t origin;
++    uint32_t offset;    /* OFFSET_ADDR / ORIGIN_ADDR: added to every address */
+     int      used;
+     int      done;
+     int32_t  cbid;      /* sceGeSetCallback id from EnQueue, -1 for none */
+ } ge_queue;
+ 
+ static ge_queue g_queue[MAX_QUEUES];
++static uint32_t g_base;     /* BASE is GE state, not per list */
+ static uint32_t g_next_id;
+ 
+ /* ---- callbacks ---------------------------------------------------------------
+@@ -201,7 +212,10 @@ static uint32_t g_material = 0xFFFFFFFFu;
+ static struct {
+     float world[12], view[12], proj[16];
+     int   wi, vi, pi;
+-    float xscale, yscale, xpos, ypos;
++    float bone[8 * 12];                 /* BONE, eight 4x3 matrices */
++    int   bi;
++    float morph[8];                     /* MW0-7 */
++    float xscale, yscale, xpos, ypos, zscale, zpos;
+     float offx, offy;                   /* pixels */
+     float uscale, vscale, uoff, voff;
+     uint64_t behind;                    /* primitives dropped with w <= 0 */
+@@ -220,12 +234,15 @@ static void xf_reset(void) {
+     g_xf.view[0] = g_xf.view[4] = g_xf.view[8] = 1;
+     g_xf.proj[0] = g_xf.proj[5] = g_xf.proj[10] = g_xf.proj[15] = 1;
+     g_xf.uscale = g_xf.vscale = 1;
++    g_xf.morph[0] = 1;
++    for (int b = 0; b < 8; b++)
++        g_xf.bone[b * 12 + 0] = g_xf.bone[b * 12 + 4] = g_xf.bone[b * 12 + 8] = 1;
+ }
+ 
+ /* Model space to screen pixels. Returns 0 for a point behind the eye.
+  * ponytail: no near-plane clipping, so a primitive with any vertex behind the
+  * eye is dropped whole; add clipping when 3D scenes lose triangles. */
+-static int transform(const float p[3], float *sx, float *sy) {
++static int transform(const float p[3], float *sx, float *sy, float *sz, float *iw) {
+     const float *W = g_xf.world, *V = g_xf.view, *P = g_xf.proj;
+     float w[3], v[3], c[4];
+     for (int r = 0; r < 3; r++)
+@@ -237,12 +254,15 @@ static int transform(const float p[3], float *sx, float *sy) {
+     if (c[3] <= 0) return 0;
+     *sx = c[0] / c[3] * g_xf.xscale + g_xf.xpos - g_xf.offx;
+     *sy = c[1] / c[3] * g_xf.yscale + g_xf.ypos - g_xf.offy;
++    *sz = c[2] / c[3] * g_xf.zscale + g_xf.zpos;
++    *iw = 1.0f / c[3];
+     return 1;
+ }
+ 
+ /* Tracked state, and the counters that make the report worth reading. */
+ static struct {
+-    uint32_t fbp, fbw, vtype, vaddr;
++    uint32_t fbp, fbw, vtype, vaddr, iaddr;
++    uint32_t zbp, zbw;
+     uint64_t commands;
+     uint64_t prims[8];
+     uint64_t vertices;
+@@ -255,6 +275,7 @@ static struct {
+ 
+ void psp_ge_reset(void) {
+     memset(g_queue, 0, sizeof g_queue);
++    g_base = 0;
+     memset(g_cb, 0, sizeof g_cb);
+     g_pending_n = 0;
+     g_ge_delivering = 0;
+@@ -273,6 +294,7 @@ void psp_ge_reset(void) {
+     g_ds.tex_alpha = 1;
+     g_ds.sc_x1 = 479;
+     g_ds.sc_y1 = 271;
++    g_ds.zwrite = 1;
+     xf_reset();
+     psp_render_reset_pixels();
+     g_unsupported = 0;
+@@ -301,6 +323,11 @@ void psp_ge_dump_stats(FILE *out) {
+                         (unsigned long long)g_ge.op_count[i], g_ge.op_last[i]);
+     }
+     fprintf(out, "    pixels written: %llu\n", (unsigned long long)psp_render_pixels());
++    uint64_t zt, zf, zc;
++    psp_render_depth_stats(&zt, &zf, &zc);
++    fprintf(out, "    depth: ZBP 0x%06X ZBW 0x%06X, test %s func %d, %llu tested, %llu rejected, %llu cleared\n",
++            g_ge.zbp, g_ge.zbw, g_ds.ztest ? "on" : "off", g_ds.ztest_func,
++            (unsigned long long)zt, (unsigned long long)zf, (unsigned long long)zc);
+     if (g_xf.behind)
+         fprintf(out, "    %llu primitives dropped with a vertex behind the eye (no clipping)\n",
+                 (unsigned long long)g_xf.behind);
+@@ -323,11 +350,12 @@ uint64_t psp_ge_vertex_count(void)  { return g_ge.vertices; }
+  *    screen space and texture coordinates are texels, and transformed mode,
+  *    where positions go through world, view and projection and the viewport,
+  *    and texture coordinates are normalised and scaled by UV scale/offset.
+- *    Lighting, skinning, morphing and the texture matrix are not done.
++ *    Skinning (BONE), morphing (MW), index buffers and depth are done;
++ *    lighting and the texture matrix are not.
+  *  - Position as 16-bit or float; colour as 8888, the 16-bit formats, or
+  *    none; texture coordinates as 16-bit or float texels.
+  *  - Textures, CLUTs, the texture function, alpha test, blending, clear mode
+- *    and scissor are decoded into psp_draw_state for the backend. No depth.
++ *    scissor and depth are decoded into psp_draw_state for the backend.
+  *
+  * The point is to close the loop from display list to visible pixels so the
+  * rest can be measured against something. Everything omitted is omitted
+@@ -346,144 +374,222 @@ uint64_t psp_ge_vertex_count(void)  { return g_ge.vertices; }
+ 
+ uint64_t psp_ge_pixels(void) { return psp_render_pixels(); }
+ 
+-/* Size of one vertex in bytes, and the offsets within it. Components appear in
+- * a fixed order (weights, texture, colour, normal, position) and each is
+- * aligned to its own size, which is what makes the stride awkward enough to be
+- * worth computing rather than assuming. */
+-static int vertex_layout(uint32_t vtype, int *tex_off, int *col_off, int *pos_off) {
++/* Where each component sits in one vertex, and the vertex's size. Components
++ * appear in a fixed order (weights, texture, colour, normal, position), each
++ * aligned to its own element size, and the whole vertex to the largest. With
++ * morphing, a vertex is `morphs` such records back to back. */
++typedef struct {
++    int w_off, w_n, w_sz;           /* skinning weights: count, element size */
++    int tex_off, col_off, pos_off;  /* -1 when absent (pos is never absent) */
++    int one;                        /* size of one morph record */
++    int stride;                     /* size of the whole vertex */
++    int morphs;
++} vlayout;
++
++static int vertex_layout(uint32_t vtype, vlayout *L) {
+     static const int tex_sz[4]   = { 0, 1, 2, 4 };
+     static const int col_sz[8]   = { 0, 0, 0, 0, 2, 2, 2, 4 };
+     static const int norm_sz[4]  = { 0, 1, 2, 4 };
+     static const int pos_sz[4]   = { 0, 1, 2, 4 };
++    static const int w_sz[4]     = { 0, 1, 2, 4 };
+ 
+     int off = 0, align = 1;
+-    int t = tex_sz[VT_TEX(vtype)] * 2;
+-    int c = col_sz[VT_COLOR(vtype)];
+-    int n = norm_sz[VT_NORMAL(vtype)] * 3;
+-    int p = pos_sz[VT_POS(vtype)] * 3;
+ 
+-    if (VT_WEIGHT(vtype)) return 0;          /* skinning: not handled */
++    L->w_sz = w_sz[VT_WEIGHT(vtype)];
++    L->w_n  = L->w_sz ? (int)((vtype >> 14) & 7) + 1 : 0;
++    L->w_off = 0;
++    if (L->w_sz) { off = L->w_n * L->w_sz; align = L->w_sz; }
+ 
+     int ts = tex_sz[VT_TEX(vtype)];
+-    if (ts) { off = (off + ts - 1) & ~(ts - 1); *tex_off = off; off += t; if (ts > align) align = ts; }
+-    else *tex_off = -1;
++    if (ts) { off = (off + ts - 1) & ~(ts - 1); L->tex_off = off; off += ts * 2; if (ts > align) align = ts; }
++    else L->tex_off = -1;
+     int cs = col_sz[VT_COLOR(vtype)];
+-    if (cs) { off = (off + cs - 1) & ~(cs - 1); *col_off = off; off += c; if (cs > align) align = cs; }
+-    else *col_off = -1;
++    if (cs) { off = (off + cs - 1) & ~(cs - 1); L->col_off = off; off += cs; if (cs > align) align = cs; }
++    else L->col_off = -1;
+     int ns = norm_sz[VT_NORMAL(vtype)];
+-    if (ns) { off = (off + ns - 1) & ~(ns - 1); off += n; if (ns > align) align = ns; }
++    if (ns) { off = (off + ns - 1) & ~(ns - 1); off += ns * 3; if (ns > align) align = ns; }
+     int ps = pos_sz[VT_POS(vtype)];
+     if (!ps) return 0;                        /* no position: nothing to draw */
+-    off = (off + ps - 1) & ~(ps - 1); *pos_off = off; off += p;
++    off = (off + ps - 1) & ~(ps - 1); L->pos_off = off; off += ps * 3;
+     if (ps > align) align = ps;
+ 
+-    return (off + align - 1) & ~(align - 1);  /* stride */
++    L->one    = (off + align - 1) & ~(align - 1);
++    L->morphs = (int)((vtype >> 18) & 7) + 1;
++    L->stride = L->one * L->morphs;
++    return L->stride;
+ }
+ 
+-static int read_vertex(uint32_t addr, uint32_t vtype, int tex_off, int col_off,
+-                       int pos_off, psp_vertex *out, float pos[3]) {
+-    /* Through mode reads 8/16-bit values as integers; transformed mode reads
+-     * them as fixed point, signed for positions. */
+-    const int through = (int)VT_THROUGH(vtype);
+-    out->rgba = g_material;
+-    if (col_off >= 0) {
+-        if (VT_COLOR(vtype) == 7)
+-            out->rgba = psp_read32(addr + (uint32_t)col_off);
+-        else    /* 4, 5, 6: 565, 5551, 4444 -- the texture formats, numbered from 4 */
+-            out->rgba = psp_color_expand(psp_read16(addr + (uint32_t)col_off),
+-                                         (int)VT_COLOR(vtype) - 4);
+-    }
+-
+-    out->u = out->v = 0;
+-    if (tex_off >= 0) {
+-        uint32_t t = addr + (uint32_t)tex_off;
++/* Position and texture coordinate of one morph record. */
++static void read_pos_uv(uint32_t addr, uint32_t vtype, const vlayout *L, int through,
++                        float pos[3], float uv[2]) {
++    uv[0] = uv[1] = 0;
++    if (L->tex_off >= 0) {
++        uint32_t t = addr + (uint32_t)L->tex_off;
+         switch (VT_TEX(vtype)) {
+-        case 1: out->u = psp_read8(t);  out->v = psp_read8(t + 1);
+-                if (!through) { out->u /= 128.0f; out->v /= 128.0f; }
++        case 1: uv[0] = psp_read8(t);  uv[1] = psp_read8(t + 1);
++                if (!through) { uv[0] /= 128.0f; uv[1] /= 128.0f; }
+                 break;
+-        case 2: out->u = psp_read16(t); out->v = psp_read16(t + 2);
+-                if (!through) { out->u /= 32768.0f; out->v /= 32768.0f; }
++        case 2: uv[0] = psp_read16(t); uv[1] = psp_read16(t + 2);
++                if (!through) { uv[0] /= 32768.0f; uv[1] /= 32768.0f; }
+                 break;
+-        default: out->u = psp_read_f32(t); out->v = psp_read_f32(t + 4); break;
+-        }
+-        if (!through) {     /* normalised, scaled, then in texels */
+-            out->u = (out->u * g_xf.uscale + g_xf.uoff) * (float)g_ds.tex_w;
+-            out->v = (out->v * g_xf.vscale + g_xf.voff) * (float)g_ds.tex_h;
++        default: uv[0] = psp_read_f32(t); uv[1] = psp_read_f32(t + 4); break;
+         }
+     }
+ 
+-    const uint32_t a = addr + (uint32_t)pos_off;
++    const uint32_t a = addr + (uint32_t)L->pos_off;
+     switch (VT_POS(vtype)) {
+     case 1:   /* 8-bit */
+         for (int i = 0; i < 3; i++) pos[i] = (float)(int8_t)psp_read8(a + (uint32_t)i);
+         if (!through) for (int i = 0; i < 3; i++) pos[i] /= 128.0f;
+         break;
+-    case 2:   /* 16-bit */
++    case 2:   /* 16-bit; through-mode depth is unsigned */
+         for (int i = 0; i < 3; i++) pos[i] = (float)(int16_t)psp_read16(a + (uint32_t)i * 2);
+-        if (!through) for (int i = 0; i < 3; i++) pos[i] /= 32768.0f;
++        if (through) pos[2] = (float)psp_read16(a + 4);
++        else for (int i = 0; i < 3; i++) pos[i] /= 32768.0f;
+         break;
+-    case 3:   /* float */
++    default:  /* float */
+         for (int i = 0; i < 3; i++) pos[i] = psp_read_f32(a + (uint32_t)i * 4);
+         break;
+-    default:
+-        return 0;
+     }
++}
++
++/* Skinning: the position becomes the weighted sum of the bone matrices applied
++ * to it. Bones are 4x3, column by column like the world matrix. */
++static void skin(uint32_t addr, uint32_t vtype, const vlayout *L, float pos[3]) {
++    float out[3] = { 0, 0, 0 };
++    for (int b = 0; b < L->w_n; b++) {
++        const uint32_t wa = addr + (uint32_t)(L->w_off + b * L->w_sz);
++        float w;
++        switch (VT_WEIGHT(vtype)) {
++        case 1:  w = (float)psp_read8(wa) / 128.0f; break;
++        case 2:  w = (float)psp_read16(wa) / 32768.0f; break;
++        default: w = psp_read_f32(wa); break;
++        }
++        if (w == 0.0f) continue;
++        const float *M = g_xf.bone + b * 12;
++        for (int r = 0; r < 3; r++)
++            out[r] += w * (M[r] * pos[0] + M[3 + r] * pos[1] + M[6 + r] * pos[2] + M[9 + r]);
++    }
++    pos[0] = out[0]; pos[1] = out[1]; pos[2] = out[2];
++}
++
++static int read_vertex(uint32_t addr, uint32_t vtype, const vlayout *L, psp_vertex *out) {
++    /* Through mode reads 8/16-bit values as integers; transformed mode reads
++     * them as fixed point, signed for positions. */
++    const int through = (int)VT_THROUGH(vtype);
++    out->rgba = g_material;
++    if (L->col_off >= 0) {
++        if (VT_COLOR(vtype) == 7)
++            out->rgba = psp_read32(addr + (uint32_t)L->col_off);
++        else    /* 4, 5, 6: 565, 5551, 4444 -- the texture formats, numbered from 4 */
++            out->rgba = psp_color_expand(psp_read16(addr + (uint32_t)L->col_off),
++                                         (int)VT_COLOR(vtype) - 4);
++    }
++
++    float pos[3], uv[2];
++    read_pos_uv(addr, vtype, L, through, pos, uv);
++    if (L->morphs > 1) {
++        /* Morph targets blend position and texture coordinate by the MW
++         * weights; colour comes from the first record. */
++        float p[3], t[2];
++        for (int i = 0; i < 3; i++) pos[i] *= g_xf.morph[0];
++        uv[0] *= g_xf.morph[0]; uv[1] *= g_xf.morph[0];
++        for (int m = 1; m < L->morphs; m++) {
++            read_pos_uv(addr + (uint32_t)(m * L->one), vtype, L, through, p, t);
++            for (int i = 0; i < 3; i++) pos[i] += p[i] * g_xf.morph[m];
++            uv[0] += t[0] * g_xf.morph[m]; uv[1] += t[1] * g_xf.morph[m];
++        }
++    }
++
++    out->u = uv[0]; out->v = uv[1];
++    if (L->tex_off >= 0 && !through) {     /* normalised, scaled, then in texels */
++        out->u = (out->u * g_xf.uscale + g_xf.uoff) * (float)g_ds.tex_w;
++        out->v = (out->v * g_xf.vscale + g_xf.voff) * (float)g_ds.tex_h;
++    }
++
+     if (through) {
+         out->x = (int)pos[0];
+         out->y = (int)pos[1];
++        out->z = pos[2];
++        out->w = 0;
+         return 1;
+     }
+-    float sx, sy;
+-    if (!transform(pos, &sx, &sy)) return -1;
++    if (L->w_n && !through) skin(addr, vtype, L, pos);
++    float sx, sy, sz, iw;
++    if (!transform(pos, &sx, &sy, &sz, &iw)) return -1;
++    /* Keep wildly off-screen vertices inside int range; the rasterizer clips
++     * to the screen anyway. */
++    if (sx < -100000.0f) sx = -100000.0f; else if (sx > 100000.0f) sx = 100000.0f;
++    if (sy < -100000.0f) sy = -100000.0f; else if (sy > 100000.0f) sy = 100000.0f;
+     out->x = (int)floorf(sx);
+     out->y = (int)floorf(sy);
++    out->z = sz;
++    out->w = iw;
+     return 1;
+ }
+ 
++/* The index of vertex `i` of a primitive: from the index buffer when VTYPE
++ * names one, else i itself. */
++static uint32_t vertex_index(uint32_t vtype, uint32_t i) {
++    switch (VT_INDEX(vtype)) {
++    case 1:  return psp_read8(g_ge.iaddr + i);
++    case 2:  return psp_read16(g_ge.iaddr + i * 2);
++    case 3:  return psp_read32(g_ge.iaddr + i * 4);
++    default: return i;
++    }
++}
+ 
+ static void draw_prim(uint32_t type, uint32_t count) {
+     if (!g_ge.vaddr) { g_unsupported += count; return; }
+ 
+-    int tex_off = -1, col_off = -1, pos_off = 0;
+-    int stride = vertex_layout(g_ge.vtype, &tex_off, &col_off, &pos_off);
++    vlayout L;
++    int stride = vertex_layout(g_ge.vtype, &L);
+     if (!stride) { g_unsupported += count; return; }
++    const uint32_t vtype = g_ge.vtype;
+ 
+-    /* Decode the whole batch, then hand it to the backend in one call.
++    /* Decode the whole primitive, then hand it to the backend in one call.
++     * Strips and fans are order-dependent, so they are never split.
+      *
+      * Format decoding stays here rather than in each backend: the stride
+      * arithmetic and component alignment are fiddly, and duplicating them per
+      * backend means every backend is wrong in its own way. Wrong once,
+      * centrally, is at least diagnosable. */
+-    enum { BATCH = 256 };
+-    psp_vertex v[BATCH];
++    static psp_vertex v[65536], tri[65536 * 3];
++    static uint8_t bad[65536];
+     const psp_render_backend *be = psp_render_current();
+ 
+-    uint32_t done = 0;
+-    while (done < count) {
+-        uint32_t n = count - done;
+-        if (n > BATCH) n = BATCH;
+-
+-        /* Strips are order-dependent, so a batch boundary must overlap by two
+-         * vertices or the triangle spanning it is lost. */
+-        uint32_t decoded = 0;
+-        int behind = 0;
+-        for (; decoded < n; decoded++) {
+-            float pos[3];
+-            int ok = read_vertex(g_ge.vaddr + (done + decoded) * (uint32_t)stride,
+-                                 g_ge.vtype, tex_off, col_off, pos_off, &v[decoded], pos);
+-            if (!ok) break;
+-            if (ok < 0) behind = 1;
+-        }
+-        if (!decoded) break;
+-        if (behind) { g_xf.behind++; done += decoded; continue; }
+-
+-        be->draw((int)type, v, (int)decoded, &g_ds);
++    int behind = 0;
++    uint32_t n = 0;
++    for (; n < count; n++) {
++        const uint32_t idx = vertex_index(vtype, n);
++        const int ok = read_vertex(g_ge.vaddr + idx * (uint32_t)stride, vtype, &L, &v[n]);
++        if (!ok) break;
++        bad[n] = ok < 0;
++        if (ok < 0) behind = 1;
++    }
+ 
+-        if (type == 4 && decoded == BATCH && done + decoded < count)
+-            done += decoded - 2;     /* strip overlap */
+-        else
+-            done += decoded;
++    if (n && !behind) {
++        be->draw((int)type, v, (int)n, &g_ds);
++    } else if (n && type >= 3 && type <= 5) {
++        /* No clipping yet: drop just the triangles that touch a vertex behind
++         * the eye, rather than the whole primitive. */
++        uint32_t m = 0;
++        for (uint32_t i = 0; i + 2 < n; i += (type == 3 ? 3 : 1)) {
++            uint32_t a = type == 5 ? 0 : i, b = type == 5 ? i + 1 : i + 1, c = i + 2;
++            if (type == 5 && c >= n) break;
++            if (bad[a] || bad[b] || bad[c]) { g_xf.behind++; continue; }
++            tri[m++] = v[a]; tri[m++] = v[b]; tri[m++] = v[c];
++        }
++        if (m) be->draw(3, tri, (int)m, &g_ds);
++    } else if (behind) {
++        g_xf.behind++;
+     }
++
++    /* The GE leaves its pointers just past what it consumed, and games issue
++     * consecutive PRIMs without re-sending VADDR/IADDR. */
++    static const uint32_t isz[4] = { 0, 1, 2, 4 };
++    if (VT_INDEX(vtype)) g_ge.iaddr += count * isz[VT_INDEX(vtype)];
++    else                 g_ge.vaddr += count * (uint32_t)stride;
+ }
+ 
+ /* The framebuffer is always in eDRAM. Games send FBP relative to it, so a high
+@@ -496,8 +602,12 @@ static uint32_t fb_vram(void) { return PSP_VRAM_BASE | (g_ge.fbp & (PSP_VRAM_SIZ
+  * The budget is not paranoia: a list whose JUMP forms a cycle is a normal
+  * intermediate state while the CPU is still writing, and without a bound a
+  * malformed or partially-written list hangs the host with no diagnostic. */
++static uint32_t rel_addr(const ge_queue *q, uint32_t arg) {
++    return ((q->base | (arg & 0xFFFFFF)) + q->offset) & 0x0FFFFFFFu;
++}
++
+ static void run_list(ge_queue *q) {
+-    uint32_t stack[GE_STACK];
++    uint32_t stack[GE_STACK][2];        /* return address, offset */
+     int sp = 0;
+     uint64_t budget = 1u << 22;
+ 
+@@ -532,14 +642,14 @@ static void run_list(ge_queue *q) {
+             break;
+ 
+         case GE_JUMP:
+-            q->list = (q->base | (arg & 0xFFFFFC));
++            q->list = rel_addr(q, arg & 0xFFFFFC);
+             break;
+         case GE_CALL:
+-            if (sp < GE_STACK) stack[sp++] = q->list;
+-            q->list = (q->base | (arg & 0xFFFFFC));
++            if (sp < GE_STACK) { stack[sp][0] = q->list; stack[sp][1] = q->offset; sp++; }
++            q->list = rel_addr(q, arg & 0xFFFFFC);
+             break;
+         case GE_RET:
+-            if (sp > 0) q->list = stack[--sp];
++            if (sp > 0) { sp--; q->list = stack[sp][0]; q->offset = stack[sp][1]; }
+             break;
+         case GE_BJUMP:
+             /* Conditional on the bounding-box test, which needs geometry we do
+@@ -574,9 +684,34 @@ static void run_list(ge_queue *q) {
+             break;
+         }
+ 
+-        case GE_BASE:        q->base = (arg & 0xFF0000) << 8; break;
+-        case GE_ORIGIN_ADDR: q->origin = q->list - 4; break;
+-        case GE_OFFSET_ADDR: q->base = arg << 8; break;
++        /* Addresses in a list are 24 bits: BASE supplies bits 24-27, and
++         * OFFSET_ADDR (or ORIGIN_ADDR, "relative to this command") is added
++         * on top. Model data with its own CALLs into itself is written
++         * ORIGIN-relative, so it works wherever it is loaded. */
++        case GE_BASE:        q->base = g_base = (arg & 0x0F0000) << 8; break;
++        case GE_ORIGIN_ADDR: q->offset = q->list - 4; break;
++        case GE_OFFSET_ADDR: q->offset = arg << 8; break;
++
++        case GE_BOFS:  g_xf.bi = (int)(arg & 0x7F); break;
++        case GE_BONE:  if (g_xf.bi < 96) g_xf.bone[g_xf.bi++] = f24(arg); break;
++        case GE_MW0: case GE_MW0 + 1: case GE_MW0 + 2: case GE_MW0 + 3:
++        case GE_MW0 + 4: case GE_MW0 + 5: case GE_MW0 + 6: case GE_MW0 + 7:
++            g_xf.morph[cmd - GE_MW0] = f24(arg);
++            break;
++
++        case GE_ZTE:    g_ds.ztest = arg & 1; break;
++        case GE_ZTST:   g_ds.ztest_func = (int)(arg & 7); break;
++        case GE_ZMSK:   g_ds.zwrite = !(arg & 1); break;
++        case GE_ZSCALE: g_xf.zscale = f24(arg); break;
++        case GE_ZPOS:   g_xf.zpos = f24(arg); break;
++        case GE_ZBP:
++            g_ge.zbp = arg;
++            g_ds.zb_addr = PSP_VRAM_BASE | (g_ge.zbp & (PSP_VRAM_SIZE - 1));
++            break;
++        case GE_ZBW:
++            g_ge.zbw = arg;
++            g_ds.zb_stride = (int)(arg & 0xFFFF);
++            break;
+ 
+         case GE_VTYPE: g_ge.vtype = arg; break;
+         case GE_FBP:
+@@ -621,6 +756,7 @@ static void run_list(ge_queue *q) {
+             g_ds.clear = arg & 1;
+             g_ds.clear_color = (arg >> 8) & 1;
+             g_ds.clear_alpha = (arg >> 9) & 1;
++            g_ds.clear_depth = (arg >> 10) & 1;
+             break;
+ 
+         /* TBP0 carries the low 24 bits and TBW0 bits 24-31 in its top byte. */
+@@ -689,8 +825,8 @@ static void run_list(ge_queue *q) {
+         case GE_SFIX:  g_ds.blend_sfix = arg; break;
+         case GE_DFIX:  g_ds.blend_dfix = arg; break;
+ 
+-        case GE_VADDR: g_ge.vaddr = (q->base | (arg & 0xFFFFFF)); break;
+-        case GE_IADDR: break;
++        case GE_VADDR: g_ge.vaddr = rel_addr(q, arg); break;
++        case GE_IADDR: g_ge.iaddr = rel_addr(q, arg); break;
+ 
+         default:
+             /* A real state command we do not decode individually. Counted --
+@@ -726,6 +862,7 @@ static void enqueue(int head) {
+     q->stall = psp_arg(1) & ~3u;
+     q->used  = 1;
+     q->cbid  = (int32_t)psp_arg(2);
++    q->base  = g_base;
+     (void)head;
+ 
+     /* Hardware runs the list asynchronously. We run it here and finish before
+diff --git a/src/render.c b/src/render.c
+index e81c50a..976519d 100644
+--- a/src/render.c
++++ b/src/render.c
+@@ -9,13 +9,15 @@
+  * game's.
+  *
+  * Per pixel, in order: clear mode short-circuits everything; otherwise vertex
+- * colour, texture function, alpha test, blend, write. Depth, stencil, fog,
+- * dithering, colour test and logic ops are not implemented.
++ * colour, texture function, alpha test, depth test, blend, write. Stencil,
++ * fog, dithering, colour test and logic ops are not implemented.
+  */
+ 
+ #include "psprecomp/render.h"
+ #include "psprecomp/mem.h"
+ 
++#include <stdint.h>
++#include <stdlib.h>
+ #include <string.h>
+ 
+ /* ---- shared target state ------------------------------------------------- */
+@@ -246,8 +248,46 @@ static uint32_t fb_read(uint32_t at) {
+     return g_fb_fmt == 3 ? psp_read32(at) : psp_color_expand(psp_read16(at), g_fb_fmt);
+ }
+ 
++/* The depth buffer is 16-bit, in eDRAM like the framebuffer. */
++static uint32_t z_at(const psp_draw_state *st, int x, int y) {
++    return st->zb_addr + (uint32_t)(y * st->zb_stride + x) * 2u;
++}
++
++static int depth_pass(int func, uint32_t z, uint32_t d) {
++    switch (func) {
++    case 0:  return 0;
++    case 1:  return 1;
++    case 2:  return z == d;
++    case 3:  return z != d;
++    case 4:  return z < d;
++    case 5:  return z <= d;
++    case 6:  return z > d;
++    default: return z >= d;
++    }
++}
++
++/* Depth counters for the report, and PSPRECOMP_NO_DEPTH=1 to switch the
++ * depth buffer off entirely when a scene goes missing. */
++static uint64_t g_z_tested, g_z_failed, g_z_cleared;
++static int g_no_depth = -1;
++static int no_depth(void) {
++    if (g_no_depth < 0) {
++        const char *e = getenv("PSPRECOMP_NO_DEPTH");
++        g_no_depth = e && *e && *e != '0';
++    }
++    return g_no_depth;
++}
++void psp_render_depth_stats(uint64_t *tested, uint64_t *failed, uint64_t *cleared) {
++    *tested = g_z_tested; *failed = g_z_failed; *cleared = g_z_cleared;
++}
++
++static uint32_t clamp_z(float z) {
++    return z <= 0.0f ? 0u : (z >= 65535.0f ? 65535u : (uint32_t)z);
++}
++
+ /* One fragment through the pipeline. `c` is the interpolated vertex colour. */
+-static void fragment(const psp_draw_state *st, int x, int y, uint32_t c, float u, float v) {
++static void fragment(const psp_draw_state *st, int x, int y, uint32_t c, float u, float v,
++                     float zf) {
+     if (!g_fb_addr || !g_fb_stride) return;
+     if (x < 0 || y < 0 || x >= 480 || y >= 272) return;
+     if (x < st->sc_x0 || x > st->sc_x1 || y < st->sc_y0 || y > st->sc_y1) return;
+@@ -256,8 +296,12 @@ static void fragment(const psp_draw_state *st, int x, int y, uint32_t c, float u
+     const uint32_t at = g_fb_addr + (uint32_t)(y * (int)g_fb_stride + x) * bytes;
+ 
+     if (st->clear) {
+-        /* Clear mode writes only the buffers its flags name; depth (bit 10)
+-         * has no buffer here. A depth-only clear leaves the colour alone. */
++        /* Clear mode writes only the buffers its flags name. A depth-only
++         * clear leaves the colour alone. */
++        if (st->clear_depth && st->zb_stride && !no_depth()) {
++            psp_write16(z_at(st, x, y), (uint16_t)clamp_z(zf));
++            g_z_cleared++;
++        }
+         if (!st->clear_color && !st->clear_alpha) return;
+         if (!st->clear_color || !st->clear_alpha) {
+             uint32_t d = fb_read(at);
+@@ -272,6 +316,13 @@ static void fragment(const psp_draw_state *st, int x, int y, uint32_t c, float u
+             c = tex_combine(st, psp_tex_fetch(st, tx, ty), c);
+         }
+         if (st->atest && !alpha_pass(st, c)) return;
++        /* Depth is written only while the test is on, as on hardware. */
++        if (st->ztest && st->zb_stride && !no_depth()) {
++            const uint32_t za = z_at(st, x, y), z = clamp_z(zf);
++            g_z_tested++;
++            if (!depth_pass(st->ztest_func, z, psp_read16(za))) { g_z_failed++; return; }
++            if (st->zwrite) psp_write16(za, (uint16_t)z);
++        }
+         if (st->blend) c = blend(st, c, fb_read(at));
+     }
+ 
+@@ -280,8 +331,9 @@ static void fragment(const psp_draw_state *st, int x, int y, uint32_t c, float u
+     g_pixels++;
+ }
+ 
+-static int edge(const psp_vertex *p, const psp_vertex *q, int x, int y) {
+-    return (q->x - p->x) * (y - p->y) - (q->y - p->y) * (x - p->x);
++/* 64-bit: a vertex far off screen still has a well-defined edge. */
++static int64_t edge(const psp_vertex *p, const psp_vertex *q, int x, int y) {
++    return (int64_t)(q->x - p->x) * (y - p->y) - (int64_t)(q->y - p->y) * (x - p->x);
+ }
+ 
+ /* Barycentric fill with integer edge functions, so a shared edge belongs to
+@@ -301,15 +353,18 @@ static void sw_tri(const psp_vertex *a, const psp_vertex *b, const psp_vertex *c
+     if (maxx > 479) maxx = 479;
+     if (maxy > 271) maxy = 271;
+ 
+-    const int area = edge(a, b, c->x, c->y);
++    const int64_t area = edge(a, b, c->x, c->y);
+     if (area == 0) return;
+     const float inv = 1.0f / (float)area;
++    /* Perspective: interpolate u/w, v/w and 1/w, then divide. Only when all
++     * three vertices carry a 1/w; otherwise affine, as before. */
++    const int persp = a->w > 0 && b->w > 0 && c->w > 0;
+ 
+     for (int y = miny; y <= maxy; y++) {
+         for (int x = minx; x <= maxx; x++) {
+-            int w0 = edge(a, b, x, y);   /* weight of c */
+-            int w1 = edge(b, c, x, y);   /* weight of a */
+-            int w2 = edge(c, a, x, y);   /* weight of b */
++            int64_t w0 = edge(a, b, x, y);   /* weight of c */
++            int64_t w1 = edge(b, c, x, y);   /* weight of a */
++            int64_t w2 = edge(c, a, x, y);   /* weight of b */
+             if (!((w0 >= 0 && w1 >= 0 && w2 >= 0) || (w0 <= 0 && w1 <= 0 && w2 <= 0)))
+                 continue;
+             float la = (float)w1 * inv, lb = (float)w2 * inv, lc = (float)w0 * inv;
+@@ -320,9 +375,16 @@ static void sw_tri(const psp_vertex *a, const psp_vertex *b, const psp_vertex *c
+                            (int)(B(a->rgba) * la + B(b->rgba) * lb + B(c->rgba) * lc + 0.5f),
+                            (int)(A(a->rgba) * la + A(b->rgba) * lb + A(c->rgba) * lc + 0.5f));
+             }
+-            fragment(st, x, y, col,
+-                     a->u * la + b->u * lb + c->u * lc,
+-                     a->v * la + b->v * lb + c->v * lc);
++            float u, v;
++            if (persp) {
++                const float q = a->w * la + b->w * lb + c->w * lc;
++                u = (a->u * a->w * la + b->u * b->w * lb + c->u * c->w * lc) / q;
++                v = (a->v * a->w * la + b->v * b->w * lb + c->v * c->w * lc) / q;
++            } else {
++                u = a->u * la + b->u * lb + c->u * lc;
++                v = a->v * la + b->v * lb + c->v * lc;
++            }
++            fragment(st, x, y, col, u, v, a->z * la + b->z * lb + c->z * lc);
+         }
+     }
+ }
+@@ -340,7 +402,7 @@ static void sw_sprite(const psp_vertex *a, const psp_vertex *b, const psp_draw_s
+     for (int y = y0; y < y1; y++)
+         for (int x = x0; x < x1; x++)
+             fragment(st, x, y, b->rgba, a->u + (float)(x - a->x) * du,
+-                     a->v + (float)(y - a->y) * dv);
++                     a->v + (float)(y - a->y) * dv, b->z);
+ }
+ 
+ static void sw_draw(int prim, const psp_vertex *v, int count, const psp_draw_state *st) {
+diff --git a/tests/test_raster.c b/tests/test_raster.c
+index 5a8f368..6d429e1 100644
+--- a/tests/test_raster.c
++++ b/tests/test_raster.c
+@@ -519,6 +519,130 @@ static void test_framebuffer_is_vram_relative(void) {
+               ram_probe, psp_read32(ram_probe));
+ }
+ 
++/* ORIGIN makes later addresses relative to itself; CALL saves that offset and
++ * RET restores it. Model data uses this so its lists work wherever loaded. */
++static void test_origin_relative_call(void) {
++    psp_ge_reset();
++    clear_fb();
++    begin_list();
++    vertex(0, 10, 10, 0xFF00FF00u);
++    vertex(1, 20, 20, 0xFF00FF00u);
++    cmd(0x10, 0);                                  /* BASE 0: offset does it all */
++    const uint32_t origin = LIST + g_pc;
++    cmd(0x14, 0);                                  /* ORIGIN_ADDR */
++    cmd(0x0A, 0x400 - (origin - LIST));            /* CALL LIST+0x400, relative */
++    cmd(0x13, 0);                                  /* OFFSET_ADDR 0 */
++    cmd(0x10, (VERTS >> 8) & 0xFF0000);
++    end_list();
++    /* The sub-list: draw, return. */
++    uint32_t save = g_pc;
++    g_pc = 0x400;
++    cmd(0x04, (6u << 16) | 2);
++    cmd(0x0B, 0);                                  /* RET */
++    g_pc = save;
++    psp_ge_reset();
++    clear_fb();
++    call(0xAB49E76A, LIST, 0, 0, 0);
++    CHECK(pixel(15, 15) == 0xFF00FF00u, "ORIGIN-relative CALL reached the sub-list: 0x%08X", pixel(15, 15));
++}
++
++/* Indexed drawing, and the vertex pointer advancing past a non-indexed PRIM. */
++static void test_index_buffer_and_advance(void) {
++    psp_ge_reset();
++    clear_fb();
++    begin_list();
++    vertex(0, 10, 10, 0xFF0000FFu);
++    vertex(1, 20, 20, 0xFF0000FFu);
++    vertex(2, 30, 10, 0xFFFF0000u);
++    vertex(3, 40, 20, 0xFFFF0000u);
++    cmd(0x04, (6u << 16) | 2);                     /* sprite from 0,1 */
++    cmd(0x04, (6u << 16) | 2);                     /* no VADDR: from 2,3 */
++    psp_write8(VERTS + 0x800, 3);
++    psp_write8(VERTS + 0x801, 1);
++    psp_write8(VERTS + 0x802, 0);
++    psp_write8(VERTS + 0x803, 3);
++    cmd(0x01, VERTS & 0xFFFFFF);
++    cmd(0x02, (VERTS + 0x800) & 0xFFFFFF);         /* IADDR */
++    cmd(0x12, VTYPE_2D | (1u << 11));              /* 8-bit indices */
++    cmd(0x04, (6u << 16) | 2);                     /* vertices 3 and 1: (20,20)-(40,20), empty */
++    cmd(0x04, (6u << 16) | 2);                     /* index pointer moved on: 0 and 3 */
++    end_list();
++    CHECK(pixel(15, 15) != 0, "first sprite drawn");
++    CHECK(pixel(35, 15) != 0, "second sprite used the advanced vertex pointer: 0x%08X", pixel(35, 15));
++    CHECK(pixel(25, 15) == 0xFFFF0000u, "indexed sprite (vertex 0 to 3) took vertex 3's colour: 0x%08X", pixel(25, 15));
++}
++
++static void vertexz(int idx, int x, int y, int z, uint32_t rgba) {
++    vertex(idx, x, y, rgba);
++    psp_write16(VERTS + (uint32_t)idx * 12 + 8, (uint16_t)z);
++}
++
++/* Depth: a clear writes it, the test rejects what is behind, and ZMSK stops
++ * the write. */
++static void test_depth(void) {
++    psp_ge_reset();
++    clear_fb();
++    begin_list();
++    const uint32_t zb = 0x04088000u;
++    cmd(0x9E, zb & 0xFFFFFF);                       /* ZBP */
++    cmd(0x9F, 480);                                 /* ZBW */
++    vertexz(0, 0, 0, 10, 0);
++    vertexz(1, 100, 100, 10, 0);
++    cmd(0xD3, 1 | (1u << 10));                      /* CLEAR, depth only */
++    cmd(0x04, (6u << 16) | 2);
++    cmd(0xD3, 0);
++    cmd(0x23, 1);                                   /* ZTE */
++    cmd(0xDE, 7);                                   /* GEQUAL: bigger is nearer */
++    vertexz(2, 10, 10, 100, 0xFF0000FFu);
++    vertexz(3, 30, 30, 100, 0xFF0000FFu);
++    vertexz(4, 20, 20, 50, 0xFFFF0000u);
++    vertexz(5, 40, 40, 50, 0xFFFF0000u);
++    vertexz(6, 60, 60, 5, 0xFF00FF00u);
++    vertexz(7, 70, 70, 5, 0xFF00FF00u);
++    cmd(0x01, (VERTS + 2 * 12) & 0xFFFFFF);
++    cmd(0x04, (6u << 16) | 2);                      /* red, z 100 */
++    cmd(0x04, (6u << 16) | 2);                      /* blue, z 50: hidden where red is */
++    cmd(0x04, (6u << 16) | 2);                      /* green, z 5: behind the clear */
++    end_list();
++    CHECK(pixel(25, 25) == 0xFF0000FFu, "nearer red wins the overlap: 0x%08X", pixel(25, 25));
++    CHECK(pixel(35, 35) == 0xFFFF0000u, "blue drawn outside the overlap: 0x%08X", pixel(35, 35));
++    CHECK(pixel(65, 65) == 0, "green behind the cleared depth: 0x%08X", pixel(65, 65));
++    CHECK(psp_read16(zb + (25 * 480 + 25) * 2) == 100, "depth written: %u", psp_read16(zb + (25 * 480 + 25) * 2));
++}
++
++/* Skinning: one bone translating by 0.25 moves the quad like the world matrix
++ * in test_transformed_quad does. */
++static void test_skinning(void) {
++    psp_ge_reset();
++    clear_fb();
++    g_pc = 0;
++    cmd(0x10, (VERTS >> 8) & 0xFF0000);
++    cmd(0x9C, FB & 0xFFFFFF);
++    cmd(0x9D, ((FB >> 8) & 0xFF0000) | 480);
++    cmd(0x12, (7u << 2) | (3u << 7) | (1u << 9));   /* 8-bit weight x1, 8888, float xyz */
++    cmd(0x01, VERTS & 0xFFFFFF);
++    fcmd(0x42, 240.0f);  fcmd(0x43, -136.0f);
++    fcmd(0x45, 2048.0f); fcmd(0x46, 2048.0f);
++    cmd(0x4C, (2048 - 240) << 4);
++    cmd(0x4D, (2048 - 136) << 4);
++    cmd(0x2A, 0);                                   /* BOFS */
++    const float bone[12] = { 1, 0, 0,  0, 1, 0,  0, 0, 1,  0.25f, 0, 0 };
++    for (int k = 0; k < 12; k++) fcmd(0x2B, bone[k]);
++    const float xy[4][2] = { { -0.5f, 0.5f }, { 0.5f, 0.5f }, { -0.5f, -0.5f }, { 0.5f, -0.5f } };
++    for (int i = 0; i < 4; i++) {
++        uint32_t a = VERTS + (uint32_t)i * 20;      /* weight (1, pad 3) colour x y z */
++        psp_write32(a, 128);
++        psp_write32(a + 4, 0xFFFFFFFFu);
++        psp_write32(a + 8, fbits(xy[i][0]));
++        psp_write32(a + 12, fbits(xy[i][1]));
++        psp_write32(a + 16, 0);
++    }
++    cmd(0x04, (4u << 16) | 4);
++    end_list();
++    CHECK(pixel(175, 136) == 0, "bone moved the left edge past x=175: 0x%08X", pixel(175, 136));
++    CHECK(pixel(185, 136) == 0xFFFFFFFFu, "skinned quad drawn at x=185: 0x%08X", pixel(185, 136));
++}
++
+ int main(void) {
+     if (psp_mem_init() != 0) { printf("memory init failed\n"); return 1; }
+     psp_cpu_reset();
+@@ -537,6 +661,10 @@ int main(void) {
+     test_alpha_test_and_blend();
+     test_clear_mode_and_scissor();
+     test_backend_selection();
++    test_origin_relative_call();
++    test_index_buffer_and_advance();
++    test_depth();
++    test_skinning();
+ 
+     psp_mem_free();
+     printf(failures ? "raster: %d failure(s)\n" : "raster: all tests passed\n", failures);

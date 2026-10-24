@@ -1,0 +1,16 @@
+# ULES01213 EBOOT functions whose address is only ever built in a register
+# (lui/addiu) and handed to the firmware, e.g. VTimer and thread entry points.
+# Discovery follows calls and stored pointers, not these. Found by scanning
+# .text for lui/addiu pairs that land on a function start. setup.ps1 adds
+# them to the EBOOT's seeds.
+#   0889F03C  sound VTimer handler (CsePsp, set with SetVTimerHandlerWide)
+08816AE4
+08897ED8
+0889A138
+0889A700
+0889F03C
+088B2AAC
+088B4670
+088C2FD8
+088C3180
+088EFF88

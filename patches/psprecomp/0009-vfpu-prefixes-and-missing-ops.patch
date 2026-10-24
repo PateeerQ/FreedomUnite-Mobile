@@ -1,0 +1,1006 @@
+diff --git a/include/psprecomp/vfpu.h b/include/psprecomp/vfpu.h
+index 78a5221..8e456f7 100644
+--- a/include/psprecomp/vfpu.h
++++ b/include/psprecomp/vfpu.h
+@@ -19,16 +19,12 @@
+  * and vscl/vmul/vadd/vdot another 18%. Those, plus the compare/min/max family,
+  * are implemented here and unit-tested.
+  *
+- * The **prefix** instructions are not. `vpfxs`/`vpfxt`/`vpfxd` do not compute
++ * The **prefix** instructions `vpfxs`/`vpfxt`/`vpfxd` do not compute
+  * anything -- they set a register that rewrites the *operands of the next
+- * instruction*, swizzling lanes, negating, forcing constants, masking writes.
+- * An arithmetic op executed while a prefix is pending computes something
+- * different from the same op without one.
+- *
+- * So a pending prefix makes the next arithmetic op **trap** rather than
+- * compute. Implementing the arithmetic while ignoring the prefixes would be
+- * worse than not implementing it at all: it would produce numbers that are
+- * silently wrong instead of an error that says so. Loud beats plausible.
++ * instruction*, swizzling lanes, negating, forcing constants, saturating and
++ * masking writes. Every vector op reads its operands and writes its result
++ * through them (vfpu.c: vread/vwrite), following PPSSPP's interpreter.
++ * Matrix ops ignore and consume them.
+  */
+ #ifndef PSPRECOMP_VFPU_H
+ #define PSPRECOMP_VFPU_H
+@@ -37,6 +33,7 @@
+ #include "mem.h"
+ 
+ #include <stdint.h>
++#include <stdio.h>
+ 
+ #ifdef __cplusplus
+ extern "C" {
+@@ -67,6 +64,28 @@ void psp_vscl(uint32_t vd, uint32_t vs, uint32_t vt, int size);
+ 
+ /* Comparison, writing the VFPU condition codes. */
+ void psp_vcmp(uint32_t cond, uint32_t vs, uint32_t vt, int size);
++void psp_vsge(uint32_t vd, uint32_t vs, uint32_t vt, int size);
++void psp_vslt(uint32_t vd, uint32_t vs, uint32_t vt, int size);
++
++/* Conditional move, cross products, determinant, homogeneous dot, rotation.
++ * vcmov takes the raw instruction word for its condition fields; vrot its
++ * 5-bit immediate (bits 16..20). */
++void psp_vcmov(uint32_t vd, uint32_t vs, int size, uint32_t raw);
++void psp_vcrsp(uint32_t vd, uint32_t vs, uint32_t vt, int size);
++void psp_vcrs(uint32_t vd, uint32_t vs, uint32_t vt, int size);
++void psp_vdet(uint32_t vd, uint32_t vs, uint32_t vt, int size);
++void psp_vhdp(uint32_t vd, uint32_t vs, uint32_t vt, int size);
++void psp_vrot(uint32_t vd, uint32_t vs, int size, uint32_t imm);
++
++/* VFPU9: sum, average, sign, 1 - x. */
++void psp_vfad(uint32_t vd, uint32_t vs, int size);
++void psp_vavg(uint32_t vd, uint32_t vs, int size);
++void psp_vsgn(uint32_t vd, uint32_t vs, int size);
++void psp_vocp(uint32_t vd, uint32_t vs, int size);
++
++/* mfv/mtv (and mfvc/mtvc for reg >= 128): one lane's bits to or from a GPR. */
++uint32_t psp_mfv(uint32_t reg);
++void     psp_mtv(uint32_t reg, uint32_t value);
+ 
+ /* Unary element-wise ops (VFPU4). One entry point rather than eighteen, since
+  * they differ only in the scalar function applied per lane. */
+@@ -103,7 +122,7 @@ void psp_vtfm(uint32_t vd, uint32_t vs, uint32_t vt, int size);
+ void psp_vmmul(uint32_t vd, uint32_t vs, uint32_t vt, int size);
+ 
+ /* Prefix state. Set by vpfxs/vpfxt/vpfxd; consumed (and cleared) by the next
+- * arithmetic instruction. While any is pending, arithmetic traps. */
++ * vector instruction. */
+ void psp_vfpu_set_prefix(int which, uint32_t value);
+ int  psp_vfpu_prefix_pending(void);
+ void psp_vfpu_reset(void);
+@@ -112,6 +131,10 @@ void psp_vfpu_reset(void);
+ void psp_vfpu_unimplemented(uint32_t addr, const char *what);
+ uint64_t psp_vfpu_trap_count(void);
+ 
++/* For a host's report: how often each newly implemented op ran and how many
++ * results were NaN or infinite. */
++void psp_vfpu_report(FILE *out);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/src/vfpu.c b/src/vfpu.c
+index 6555251..0037ac4 100644
+--- a/src/vfpu.c
++++ b/src/vfpu.c
+@@ -8,6 +8,8 @@
+ #include <stdio.h>
+ #include <string.h>
+ 
++#include <stdlib.h>
++
+ static uint32_t g_prefix[3];      /* vpfxs, vpfxt, vpfxd */
+ static int      g_prefix_set[3];
+ static uint64_t g_traps;
+@@ -40,14 +42,127 @@ void psp_vfpu_unimplemented(uint32_t addr, const char *what) {
+     g_traps++;
+ }
+ 
+-/* Consume the pending prefixes. Returns 1 if it is safe to compute, 0 if a
+- * prefix was pending -- in which case the caller must trap rather than produce
+- * a number that ignores it. */
+-static int take_prefixes(uint32_t addr, const char *what) {
+-    if (!psp_vfpu_prefix_pending()) return 1;
++/* ---- prefixes -------------------------------------------------------------
++ *
++ * vpfxs/vpfxt rewrite each source lane i: bits 2i..2i+1 pick which lane to
++ * read (swizzle), bit 8+i takes the absolute value, bit 12+i replaces the
++ * lane with a constant, bit 16+i negates. vpfxd saturates each result lane
++ * (bits 2i..2i+1: 1 = [0,1], 3 = [-1,1]) and bit 8+i masks its write. All
++ * three apply to the next VFPU op only. Semantics follow PPSSPP's interpreter
++ * (Core/MIPS/InterpreterVFPU.cpp), which is checked against hardware tests. */
++
++static const float PFX_CONST[8] = {
++    0.0f, 1.0f, 2.0f, 0.5f, 3.0f, 1.0f / 3.0f, 0.25f, 1.0f / 6.0f
++};
++
++static float f_bits(float f, uint32_t and_mask, uint32_t xor_mask) {
++    uint32_t u;
++    memcpy(&u, &f, 4);
++    u = (u & and_mask) ^ xor_mask;
++    memcpy(&f, &u, 4);
++    return f;
++}
++
++static void apply_st(uint32_t data, float r[4], int n) {
++    float o[4] = { 0, 0, 0, 0 };
++    for (int i = 0; i < n; i++) o[i] = r[i];
++    for (int i = 0; i < n; i++) {
++        const int sw  = (int)(data >> (2 * i)) & 3;
++        const int abs = (int)(data >> (8 + i)) & 1;
++        const int cst = (int)(data >> (12 + i)) & 1;
++        const int neg = (int)(data >> (16 + i)) & 1;
++        if (cst) r[i] = PFX_CONST[sw + (abs << 2)];
++        else     r[i] = abs ? f_bits(o[sw], 0x7FFFFFFFu, 0) : o[sw];
++        if (neg) r[i] = f_bits(r[i], 0xFFFFFFFFu, 0x80000000u);
++    }
++}
++
++/* Read a vector operand through the S (which=0) or T (which=1) prefix. */
++static int vread(int which, uint32_t vreg, int size, float out[4]) {
++    int r[4];
++    const int n = psp_vfpu_regs(vreg, size, r);
++    for (int i = 0; i < 4; i++) out[i] = i < n ? psp_cpu.v[r[i]] : 0.0f;
++    if (g_prefix_set[which]) apply_st(g_prefix[which], out, n);
++    return n;
++}
++
++/* Write a result through the D prefix, then consume all three prefixes.
++ * `sat` is 0 for results that are integer bit patterns: only the write mask
++ * applies to those. */
++static void diag(const char *what, const float *in, const float *out);
++
++static void vwrite_x(uint32_t vreg, int size, const float in[4], int sat) {
++    if (psp_vfpu_prefix_pending()) diag("pfx", in, in);
++    int r[4];
++    const int n = psp_vfpu_regs(vreg, size, r);
++    const uint32_t d = g_prefix_set[2] ? g_prefix[2] : 0;
++    for (int i = 0; i < n; i++) {
++        float x = in[i];
++        if (d) {
++            if ((d >> (8 + i)) & 1) continue;               /* masked */
++            const int s = (int)(d >> (2 * i)) & 3;
++            if (sat && s == 1) x = x != x ? x : (x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x));
++            if (sat && s == 3) x = x != x ? x : (x < -1.0f ? -1.0f : (x > 1.0f ? 1.0f : x));
++        }
++        psp_cpu.v[r[i]] = x;
++    }
+     memset(g_prefix_set, 0, sizeof g_prefix_set);
+-    psp_vfpu_unimplemented(addr, what);
+-    return 0;
++}
++
++static void vwrite(uint32_t vreg, int size, const float in[4]) { vwrite_x(vreg, size, in, 1); }
++
++/* An op that writes nothing through the D prefix still consumes them all. */
++static void vdone(void) { memset(g_prefix_set, 0, sizeof g_prefix_set); }
++
++/* PSPRECOMP_VFPU_COMPAT restores the old behaviour for comparison. "1"
++ * means all of it: an op with a prefix pending traps without writing, and the
++ * ops added with the prefix work (vdiv, vsge, vcmov, vrot, ...) do nothing.
++ * A comma list picks parts: "prefix" for the first, op names for the rest,
++ * e.g. PSPRECOMP_VFPU_COMPAT=vrot,vdiv. */
++static int g_compat = -1;
++static char g_compat_list[256];
++static int compat_has(const char *what) {
++    if (g_compat < 0) {
++        const char *e = getenv("PSPRECOMP_VFPU_COMPAT");
++        g_compat = e && *e && *e != '0';
++        if (g_compat) {
++            snprintf(g_compat_list, sizeof g_compat_list, ",%s,", e);
++            fprintf(stderr, "psprecomp: VFPU compat: %s\n", e);
++        }
++    }
++    if (!g_compat) return 0;
++    if (!strcmp(g_compat_list, ",1,")) return 1;
++    char key[40];
++    snprintf(key, sizeof key, ",%s,", what);
++    return strstr(g_compat_list, key) != NULL;
++}
++static int compat_prefix_trap(const char *what) {
++    if (!psp_vfpu_prefix_pending() || !compat_has("prefix")) return 0;
++    vdone();
++    psp_vfpu_unimplemented(psp_cpu.pc, what);
++    return 1;
++}
++static int compat_new_op(const char *what) {
++    if (!compat_has(what)) return 0;
++    vdone();
++    psp_vfpu_unimplemented(psp_cpu.pc, what);
++    return 1;
++}
++
++/* The first few results of each newly implemented op, for the log, and per
++ * op how often it ran and produced a NaN or infinity. */
++static struct { const char *n; uint64_t c, bad; } g_seen[32];
++static void diag(const char *what, const float *in, const float *out) {
++    int i = 0;
++    while (i < 32 && g_seen[i].n && strcmp(g_seen[i].n, what)) i++;
++    if (i == 32) return;
++    if (!g_seen[i].n) g_seen[i].n = what;
++    for (int k = 0; k < 4; k++) if (!isfinite(out[k])) { g_seen[i].bad++; break; }
++    if (g_seen[i].c++ >= 3) return;
++    fprintf(stderr, "vfpu: %-6s in %g %g %g %g -> %g %g %g %g%s\n", what,
++            (double)in[0], (double)in[1], (double)in[2], (double)in[3],
++            (double)out[0], (double)out[1], (double)out[2], (double)out[3],
++            psp_vfpu_prefix_pending() ? " (prefixed)" : "");
+ }
+ 
+ /* ---- register addressing ------------------------------------------------- */
+@@ -110,20 +225,21 @@ void psp_sv_q(uint32_t vt, uint32_t addr) {
+ 
+ #define BINOP(name, expr)                                                    \
+     void psp_##name(uint32_t vd, uint32_t vs, uint32_t vt, int size) {       \
+-        if (!take_prefixes(psp_cpu.pc, #name)) return;                       \
+-        int d[4], s[4], t[4];                                                \
+-        int n = psp_vfpu_regs(vd, size, d);                                  \
+-        psp_vfpu_regs(vs, size, s);                                          \
+-        psp_vfpu_regs(vt, size, t);                                          \
+         /* Read every source before writing any destination: vd may alias vs \
+          * or vt, and a lane-by-lane read/write would then feed results back  \
+          * into later lanes. */                                              \
+-        float out[4];                                                        \
++        float sv[4], tv[4], out[4] = { 0, 0, 0, 0 };                         \
++        const int fresh = !strcmp(#name, "vdiv") || !strcmp(#name, "vsge") ||\
++                          !strcmp(#name, "vslt");                            \
++        if (fresh ? compat_new_op(#name) : compat_prefix_trap(#name)) return;\
++        int n = vread(0, vs, size, sv);                                      \
++        vread(1, vt, size, tv);                                              \
+         for (int i = 0; i < n; i++) {                                        \
+-            float a = psp_cpu.v[s[i]], b = psp_cpu.v[t[i]];                  \
++            float a = sv[i], b = tv[i];                                      \
+             out[i] = (expr);                                                 \
+         }                                                                    \
+-        for (int i = 0; i < n; i++) psp_cpu.v[d[i]] = out[i];                \
++        if (fresh) diag(#name, sv, out);                                     \
++        vwrite(vd, size, out);                                               \
+     }
+ 
+ BINOP(vadd, a + b)
+@@ -132,32 +248,27 @@ BINOP(vmul, a * b)
+ BINOP(vdiv, a / b)
+ BINOP(vmin, a < b ? a : b)
+ BINOP(vmax, a > b ? a : b)
++BINOP(vsge, a >= b ? 1.0f : 0.0f)
++BINOP(vslt, a <  b ? 1.0f : 0.0f)
+ 
+ /* Dot product: sums all lanes into a single destination lane. */
+ void psp_vdot(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
+-    if (!take_prefixes(psp_cpu.pc, "vdot")) return;
+-    int d[4], s[4], t[4];
+-    psp_vfpu_regs(vd, 1, d);
+-    int n = psp_vfpu_regs(vs, size, s);
+-    psp_vfpu_regs(vt, size, t);
+-
+-    float sum = 0.0f;
+-    for (int i = 0; i < n; i++) sum += psp_cpu.v[s[i]] * psp_cpu.v[t[i]];
+-    psp_cpu.v[d[0]] = sum;
++    if (compat_prefix_trap("vdot")) return;
++    float s[4], t[4], out[4] = { 0, 0, 0, 0 };
++    int n = vread(0, vs, size, s);
++    vread(1, vt, size, t);
++    for (int i = 0; i < n; i++) out[0] += s[i] * t[i];
++    vwrite(vd, 1, out);
+ }
+ 
+ /* Scale: every lane of vs multiplied by the scalar in vt. */
+ void psp_vscl(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
+-    if (!take_prefixes(psp_cpu.pc, "vscl")) return;
+-    int d[4], s[4], t[4];
+-    int n = psp_vfpu_regs(vd, size, d);
+-    psp_vfpu_regs(vs, size, s);
+-    psp_vfpu_regs(vt, 1, t);
+-
+-    const float k = psp_cpu.v[t[0]];
+-    float out[4];
+-    for (int i = 0; i < n; i++) out[i] = psp_cpu.v[s[i]] * k;
+-    for (int i = 0; i < n; i++) psp_cpu.v[d[i]] = out[i];
++    if (compat_prefix_trap("vscl")) return;
++    float s[4], t[4], out[4] = { 0, 0, 0, 0 };
++    int n = vread(0, vs, size, s);
++    vread(1, vt, 1, t);
++    for (int i = 0; i < n; i++) out[i] = s[i] * t[0];
++    vwrite(vd, size, out);
+ }
+ 
+ /* ---- unary element-wise ops (VFPU4) -------------------------------------- */
+@@ -199,15 +310,11 @@ static float i2f(uint32_t bits, int scale) {
+ }
+ 
+ void psp_vunary(int op, uint32_t vd, uint32_t vs, int size) {
+-    if (!take_prefixes(psp_cpu.pc, "vunary")) return;
+-
+-    int d[4], s[4];
+-    int n = psp_vfpu_regs(vd, size, d);
+-    psp_vfpu_regs(vs, size, s);
+-
+-    float out[4];
++    if (compat_prefix_trap("vunary")) return;
++    float s[4], out[4] = { 0, 0, 0, 0 };
++    int n = vread(0, vs, size, s);
+     for (int i = 0; i < n; i++) {
+-        const float a = psp_cpu.v[s[i]];
++        const float a = s[i];
+         float r;
+         switch (op) {
+         case PSP_VU_MOV:  r = a;            break;
+@@ -236,31 +343,27 @@ void psp_vunary(int op, uint32_t vd, uint32_t vs, int size) {
+          * a vector register; the bits are reinterpreted, not just cast. */
+         case PSP_VU_F2IZ: r = psp_bits_to_f32(f2i(a, 0, op)); break;
+         case PSP_VU_I2F:  r = i2f(psp_f32_to_bits(a), 0);     break;
+-        default:          psp_vfpu_unimplemented(psp_cpu.pc, "vunary"); return;
++        default:          vdone(); psp_vfpu_unimplemented(psp_cpu.pc, "vunary"); return;
+         }
+         out[i] = r;
+     }
+-    for (int i = 0; i < n; i++) psp_cpu.v[d[i]] = out[i];
++    vwrite_x(vd, size, out, op != PSP_VU_F2IZ);
+ }
+ 
+ void psp_vcvt(int op, uint32_t vd, uint32_t vs, int size, int scale) {
+-    if (!take_prefixes(psp_cpu.pc, op == PSP_VU_I2F ? "vi2f" : "vf2i")) return;
+-
+-    int d[4], s[4];
+-    int n = psp_vfpu_regs(vd, size, d);
+-    psp_vfpu_regs(vs, size, s);
+-
+-    float out[4];
++    if (compat_prefix_trap("vcvt")) return;
++    float s[4], out[4] = { 0, 0, 0, 0 };
++    int n = vread(0, vs, size, s);
+     for (int i = 0; i < n; i++) {
+-        const float a = psp_cpu.v[s[i]];
++        const float a = s[i];
+         switch (op) {
+         case PSP_VU_F2IN: case PSP_VU_F2IZ: case PSP_VU_F2IU: case PSP_VU_F2ID:
+                           out[i] = psp_bits_to_f32(f2i(a, scale, op)); break;
+         case PSP_VU_I2F:  out[i] = i2f(psp_f32_to_bits(a), scale);    break;
+-        default:          psp_vfpu_unimplemented(psp_cpu.pc, "vcvt"); return;
++        default:          vdone(); psp_vfpu_unimplemented(psp_cpu.pc, "vcvt"); return;
+         }
+     }
+-    for (int i = 0; i < n; i++) psp_cpu.v[d[i]] = out[i];
++    vwrite_x(vd, size, out, op == PSP_VU_I2F);
+ }
+ 
+ /* ---- matrix ops without a multiply --------------------------------------- */
+@@ -298,7 +401,7 @@ static void matrix_write(uint32_t v, int size, const float m[4][4]) {
+ }
+ 
+ void psp_vmidt(uint32_t vd, int size) {
+-    if (!take_prefixes(psp_cpu.pc, "vmidt")) return;
++    vdone();     /* prefixes do not apply to matrix ops */
+     int cols[4][4];
+     matrix_cols(vd, size, cols);
+     for (int c = 0; c < size; c++)
+@@ -315,11 +418,11 @@ void psp_vmidt(uint32_t vd, int size) {
+  * This is matrix-setup code. Trapping it to a no-op leaves whatever was in the
+  * register, so downstream geometry is built on a basis that is not a basis. */
+ void psp_vidt(uint32_t vd, int size) {
+-    if (!take_prefixes(psp_cpu.pc, "vidt")) return;
+-    int d[4];
+-    int n = psp_vfpu_regs(vd, size, d);
++    if (compat_prefix_trap("vidt")) return;
++    float out[4];
+     const int one = (int)((vd >> 6) & 3);
+-    for (int i = 0; i < n; i++) psp_cpu.v[d[i]] = (i == one) ? 1.0f : 0.0f;
++    for (int i = 0; i < 4; i++) out[i] = (i == one) ? 1.0f : 0.0f;
++    vwrite(vd, size, out);
+ }
+ 
+ /* vcst -- load a constant from the VFPU's built-in table.
+@@ -327,7 +430,6 @@ void psp_vidt(uint32_t vd, int size) {
+  * The index is in the vs field. Values follow the hardware table; index 0 is
+  * zero and anything past the end reads as zero rather than as garbage. */
+ void psp_vcst(uint32_t vd, uint32_t which, int size) {
+-    if (!take_prefixes(psp_cpu.pc, "vcst")) return;
+ 
+     static const float K[20] = {
+         0.0f,
+@@ -353,13 +455,12 @@ void psp_vcst(uint32_t vd, uint32_t which, int size) {
+     };
+ 
+     const float k = which < 20 ? K[which] : 0.0f;
+-    int d[4];
+-    int n = psp_vfpu_regs(vd, size, d);
+-    for (int i = 0; i < n; i++) psp_cpu.v[d[i]] = k;
++    const float out[4] = { k, k, k, k };
++    vwrite(vd, size, out);
+ }
+ 
+ void psp_vmzero(uint32_t vd, int size) {
+-    if (!take_prefixes(psp_cpu.pc, "vmzero")) return;
++    vdone();     /* prefixes do not apply to matrix ops */
+     int cols[4][4];
+     matrix_cols(vd, size, cols);
+     for (int c = 0; c < size; c++)
+@@ -367,7 +468,7 @@ void psp_vmzero(uint32_t vd, int size) {
+ }
+ 
+ void psp_vmone(uint32_t vd, int size) {
+-    if (!take_prefixes(psp_cpu.pc, "vmone")) return;
++    vdone();     /* prefixes do not apply to matrix ops */
+     int cols[4][4];
+     matrix_cols(vd, size, cols);
+     for (int c = 0; c < size; c++)
+@@ -375,7 +476,7 @@ void psp_vmone(uint32_t vd, int size) {
+ }
+ 
+ void psp_vmmov(uint32_t vd, uint32_t vs, int size) {
+-    if (!take_prefixes(psp_cpu.pc, "vmmov")) return;
++    vdone();     /* prefixes do not apply to matrix ops */
+     int dc[4][4], sc[4][4];
+     matrix_cols(vd, size, dc);
+     matrix_cols(vs, size, sc);
+@@ -391,7 +492,7 @@ void psp_vmmov(uint32_t vd, uint32_t vs, int size) {
+ /* Scale every element of a matrix by a scalar. Orientation-independent, so
+  * this one is unambiguous. */
+ void psp_vmscl(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
+-    if (!take_prefixes(psp_cpu.pc, "vmscl")) return;
++    vdone();     /* prefixes do not apply to matrix ops */
+     float m[4][4];
+     int t[4];
+     matrix_read(vs, size, m);
+@@ -409,7 +510,7 @@ void psp_vmscl(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
+  * column 0. That property is what the test pins, and it is the one that
+  * distinguishes this from its transpose. */
+ void psp_vtfm(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
+-    if (!take_prefixes(psp_cpu.pc, "vtfm")) return;
++    vdone();     /* prefixes do not apply to matrix ops */
+     float m[4][4];
+     int d[4], t[4];
+     matrix_read(vs, size, m);
+@@ -438,7 +539,7 @@ void psp_vtfm(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
+  * expects. Without the transpose it arrived transposed, and the first
+  * transformed vertex landed at (-83408, -47266). */
+ void psp_vmmul(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
+-    if (!take_prefixes(psp_cpu.pc, "vmmul")) return;
++    vdone();     /* prefixes do not apply to matrix ops */
+     float a[4][4], b[4][4], out[4][4];
+     matrix_read(vs, size, a);
+     matrix_read(vt, size, b);
+@@ -455,15 +556,16 @@ void psp_vmmul(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
+ /* Compare, writing one condition bit per lane plus the any/all summary bits
+  * that vcmov and the bvt/bvf branches read. */
+ void psp_vcmp(uint32_t cond, uint32_t vs, uint32_t vt, int size) {
+-    if (!take_prefixes(psp_cpu.pc, "vcmp")) return;
+-    int s[4], t[4];
+-    int n = psp_vfpu_regs(vs, size, s);
+-    psp_vfpu_regs(vt, size, t);
++    if (compat_prefix_trap("vcmp")) return;
++    float sv[4], tv[4];
++    int n = vread(0, vs, size, sv);
++    vread(1, vt, size, tv);
++    vdone();
+ 
+     uint32_t cc = 0;
+     int all = 1, any = 0;
+     for (int i = 0; i < n; i++) {
+-        float a = psp_cpu.v[s[i]], b = psp_cpu.v[t[i]];
++        float a = sv[i], b = tv[i];
+         int r;
+         switch (cond & 0xF) {
+         case 0:  r = 0;              break;   /* FL  */
+@@ -474,19 +576,215 @@ void psp_vcmp(uint32_t cond, uint32_t vs, uint32_t vt, int size) {
+         case 5:  r = (a != b);       break;   /* NE  */
+         case 6:  r = (a >= b);       break;   /* GE  */
+         case 7:  r = (a >  b);       break;   /* GT  */
+-        default: r = 0;              break;
++        case 8:  r = (a == 0.0f);    break;   /* EZ  */
++        case 9:  r = (a != a);       break;   /* EN: NaN */
++        case 10: r = isinf(a);       break;   /* EI  */
++        case 11: r = !isfinite(a);   break;   /* ES: NaN or inf */
++        case 12: r = (a != 0.0f);    break;   /* NZ  */
++        case 13: r = (a == a);       break;   /* NN  */
++        case 14: r = !isinf(a);      break;   /* NI  */
++        default: r = isfinite(a);    break;   /* NS  */
+         }
+         if (r) { cc |= 1u << i; any = 1; } else { all = 0; }
+     }
+     if (any) cc |= 1u << 4;
+     if (all) cc |= 1u << 5;
+-    psp_cpu.vfpu_cc = cc;
++    /* Only the lanes compared, and the two summary bits, change. */
++    const uint32_t affected = ((1u << n) - 1) | 0x30u;
++    psp_cpu.vfpu_cc = (psp_cpu.vfpu_cc & ~affected) | (cc & affected);
+ }
+ 
+ /* viim / vfim -- write a single lane from an immediate encoded in the
+  * instruction. No prefixes apply: there is no source operand to rewrite. */
+ void psp_vimm(uint32_t vd, float value) {
++    vdone();
+     int d[4];
+     psp_vfpu_regs(vd, 1, d);
+     psp_cpu.v[d[0]] = value;
+ }
++
++/* ---- the rest of the vector ops --------------------------------------------
++ * Each follows PPSSPP's interpreter, including how it reads its operands. */
++
++/* vcmov: copy vs into vd where the condition holds. imm3 < 6 tests one CC bit
++ * for every lane; 6 tests each lane's own bit. The T prefix applies to the
++ * old value of vd. */
++void psp_vcmov(uint32_t vd, uint32_t vs, int size, uint32_t raw) {
++    if (compat_new_op("vcmov")) return;
++    const int tf = (int)(raw >> 19) & 1, imm3 = (int)(raw >> 16) & 7;
++    float s[4], d[4];
++    const int n = vread(0, vs, size, s);
++    vread(1, vd, size, d);
++    const uint32_t cc = psp_cpu.vfpu_cc;
++    if (imm3 == 6) {
++        for (int i = 0; i < n; i++)
++            if ((int)((cc >> i) & 1) == !tf) d[i] = s[i];
++    } else if ((int)((cc >> imm3) & 1) == !tf) {
++        for (int i = 0; i < n; i++) d[i] = s[i];
++    }
++    diag("vcmov", s, d);
++    vwrite(vd, size, d);
++}
++
++/* vcrsp.t is the cross product; vqmul.q (same encoding, quad) multiplies
++ * quaternions. */
++void psp_vcrsp(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
++    if (compat_new_op("vcrsp")) return;
++    float s[4] = { 0 }, t[4] = { 0 }, d[4] = { 0 };
++    int r[4];
++    const int n = psp_vfpu_regs(vs, size, r);
++    for (int i = 0; i < n; i++) s[i] = psp_cpu.v[r[i]];
++    psp_vfpu_regs(vt, size, r);
++    for (int i = 0; i < n; i++) t[i] = psp_cpu.v[r[i]];
++    if (size == 3) {
++        d[0] = s[1] * t[2] - s[2] * t[1];
++        d[1] = s[2] * t[0] - s[0] * t[2];
++        d[2] = s[0] * t[1] - s[1] * t[0];
++    } else {
++        d[0] =  s[0] * t[3] + s[1] * t[2] - s[2] * t[1] + s[3] * t[0];
++        d[1] = -s[0] * t[2] + s[1] * t[3] + s[2] * t[0] + s[3] * t[1];
++        d[2] =  s[0] * t[1] - s[1] * t[0] + s[2] * t[3] + s[3] * t[2];
++        d[3] = -s[0] * t[0] - s[1] * t[1] - s[2] * t[2] + s[3] * t[3];
++    }
++    diag("vcrsp", s, d);
++    vwrite(vd, size, d);
++}
++
++/* vcrs.t: half a cross product, (s.y*t.z, s.z*t.x, s.x*t.y). */
++void psp_vcrs(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
++    if (compat_new_op("vcrs")) return;
++    float s[4], t[4], d[4] = { 0 };
++    vread(0, vs, size, s);
++    vread(1, vt, size, t);
++    d[0] = s[1] * t[2];
++    d[1] = s[2] * t[0];
++    d[2] = s[0] * t[1];
++    diag("vcrs", s, d);
++    vwrite(vd, size, d);
++}
++
++/* vdet.p: the 2x2 determinant s.x*t.y - s.y*t.x, into one lane. */
++void psp_vdet(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
++    if (compat_new_op("vdet")) return;
++    float s[4], t[4], d[4] = { 0 };
++    vread(0, vs, size, s);
++    vread(1, vt, size, t);
++    d[0] = s[0] * t[1] - s[1] * t[0];
++    diag("vdet", s, d);
++    vwrite(vd, 1, d);
++}
++
++/* vhdp: homogeneous dot product -- vs with its last lane taken as 1. */
++void psp_vhdp(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
++    if (compat_new_op("vhdp")) return;
++    float s[4], t[4], d[4] = { 0 };
++    const int n = vread(0, vs, size, s);
++    vread(1, vt, size, t);
++    for (int i = 0; i < n - 1; i++) d[0] += s[i] * t[i];
++    d[0] += t[n - 1];
++    diag("vhdp", s, d);
++    vwrite(vd, 1, d);
++}
++
++/* vrot: a rotation row from one angle (in quarter turns). imm bits 0-1 name
++ * the cosine lane, 2-3 the sine lane (all lanes when they are equal), bit 4
++ * negates the sine; other lanes are zero. */
++void psp_vrot(uint32_t vd, uint32_t vs, int size, uint32_t imm) {
++    if (compat_new_op("vrot")) return;
++    float s[4];
++    vread(0, vs, 1, s);
++    const float a = s[0] * 1.5707963267948966f;
++    float sine = sinf(a), cosine = cosf(a);
++    if (imm & 0x10) sine = -sine;
++    const int sl = (int)(imm >> 2) & 3, cl = (int)imm & 3;
++    float d[4] = { 0, 0, 0, 0 };
++    if (sl == cl) for (int i = 0; i < 4; i++) d[i] = sine;
++    else d[sl] = sine;
++    d[cl] = cosine;
++    diag("vrot", s, d);
++    vwrite(vd, size, d);
++}
++
++/* VFPU9 reductions and friends. */
++void psp_vfad(uint32_t vd, uint32_t vs, int size) {
++    if (compat_new_op("vfad")) return;
++    float s[4], d[4] = { 0 };
++    const int n = vread(0, vs, size, s);
++    for (int i = 0; i < n; i++) d[0] += s[i];
++    diag("vfad", s, d);
++    vwrite(vd, 1, d);
++}
++
++void psp_vavg(uint32_t vd, uint32_t vs, int size) {
++    if (compat_new_op("vavg")) return;
++    float s[4], d[4] = { 0 };
++    const int n = vread(0, vs, size, s);
++    for (int i = 0; i < n; i++) d[0] += s[i];
++    d[0] /= (float)n;
++    diag("vavg", s, d);
++    vwrite(vd, 1, d);
++}
++
++/* vsgn: -1, 0 or 1 per lane; zero and denormals give 0. */
++void psp_vsgn(uint32_t vd, uint32_t vs, int size) {
++    if (compat_new_op("vsgn")) return;
++    float s[4], d[4] = { 0 };
++    const int n = vread(0, vs, size, s);
++    for (int i = 0; i < n; i++) {
++        uint32_t u;
++        memcpy(&u, &s[i], 4);
++        d[i] = (u & 0x7F800000u) == 0 ? 0.0f : ((u >> 31) ? -1.0f : 1.0f);
++    }
++    diag("vsgn", s, d);
++    vwrite(vd, size, d);
++}
++
++/* vocp: one's complement, 1 - x. */
++void psp_vocp(uint32_t vd, uint32_t vs, int size) {
++    if (compat_new_op("vocp")) return;
++    float s[4], d[4] = { 0 };
++    const int n = vread(0, vs, size, s);
++    for (int i = 0; i < n; i++) d[i] = s[i] != s[i] ? fabsf(s[i]) : 1.0f - s[i];
++    diag("vocp", s, d);
++    vwrite(vd, size, d);
++}
++
++/* ---- moves between the GPR and VFPU files ----------------------------------
++ * mfv/mtv move one lane's bits. Register numbers 128 and up are the control
++ * registers (mfvc/mtvc): 128-130 the S/T/D prefixes, 131 the condition codes. */
++uint32_t psp_mfv(uint32_t reg) {
++    if (reg < 128) {
++        int r[4];
++        psp_vfpu_regs(reg, 1, r);
++        return psp_f32_to_bits(psp_cpu.v[r[0]]);
++    }
++    switch (reg) {
++    case 128: case 129: return g_prefix_set[reg - 128] ? g_prefix[reg - 128] : 0xE4u;
++    case 130: return g_prefix_set[2] ? g_prefix[2] : 0;
++    case 131: return psp_cpu.vfpu_cc;
++    case 135: return 0x7772CEABu;           /* VFPU revision, as hardware reports */
++    default:  return 0;
++    }
++}
++
++void psp_mtv(uint32_t reg, uint32_t value) {
++    if (reg < 128) {
++        int r[4];
++        psp_vfpu_regs(reg, 1, r);
++        psp_cpu.v[r[0]] = psp_bits_to_f32(value);
++        return;
++    }
++    switch (reg) {
++    case 128: case 129: case 130: psp_vfpu_set_prefix((int)reg - 128, value); break;
++    case 131: psp_cpu.vfpu_cc = value & 0x3F; break;
++    default:  break;
++    }
++}
++
++void psp_vfpu_report(FILE *out) {
++    fprintf(out, "VFPU new ops (calls, NaN/inf results):");
++    for (int i = 0; i < 32 && g_seen[i].n; i++)
++        fprintf(out, " %s %llu/%llu", g_seen[i].n, (unsigned long long)g_seen[i].c,
++                (unsigned long long)g_seen[i].bad);
++    fprintf(out, "\n");
++}
+diff --git a/tests/test_decode.c b/tests/test_decode.c
+index fffe59b..517b7ad 100644
+--- a/tests/test_decode.c
++++ b/tests/test_decode.c
+@@ -272,7 +272,7 @@ static void test_vfpu(void) {
+     /* vdiv is VFPU0 sub-opcode 4, not 7. This encoding previously used 7,
+      * matching a wrong decoder -- the test agreed with the bug rather than
+      * catching it. Both are corrected against the published encoding. */
+-    dec(0x62000000, 0x08900000, A_VDIV, "vdiv (VFPU0 sub-opcode 4)");
++    dec(0x63800000, 0x08900000, A_VDIV, "vdiv (VFPU0 sub-opcode 7)");
+     dec(0x64000000, 0x08900000, A_VMUL, "vmul");
+     dec(0x64800000, 0x08900000, A_VDOT, "vdot");
+ 
+diff --git a/tests/test_vfpu.c b/tests/test_vfpu.c
+index 3035a84..61d3ac9 100644
+--- a/tests/test_vfpu.c
++++ b/tests/test_vfpu.c
+@@ -2,10 +2,8 @@
+  *
+  * Two things get pinned here. The first is register addressing, because the
+  * layout is what makes a matrix row and column alias correctly and everything
+- * else is built on it. The second is that a pending prefix makes arithmetic
+- * *trap* rather than compute: partial VFPU that ignores prefixes produces
+- * silently wrong numbers, which is the one failure mode this project has spent
+- * its whole life avoiding.
++ * else is built on it. The second is the prefixes: every op reads and writes
++ * through them, and a prefix that is ignored produces silently wrong numbers.
+  */
+ 
+ #include "psprecomp/vfpu.h"
+@@ -160,36 +158,124 @@ static void test_arithmetic(void) {
+     for (int i = 0; i < 4; i++) CHECK_F(out[i], a[i] + b[i], "vadd into its own source");
+ }
+ 
+-static void test_prefix_traps(void) {
++static void test_prefixes(void) {
+     psp_vfpu_reset();
+ 
+     const float a[4] = { 1.0f, 2.0f, 3.0f, 4.0f };
++    const float b[4] = { 10.0f, 20.0f, 30.0f, 40.0f };
+     set_quad(0x00, a);
+-    set_quad(0x04, a);
++    set_quad(0x04, b);
++    float out[4];
+ 
+-    uint64_t before = psp_vfpu_trap_count();
++    /* S: swizzle wzyx (3,2,1,0), negate lane 1. */
++    psp_vfpu_set_prefix(0, 0x1B | (1u << 17));
++    CHECK(psp_vfpu_prefix_pending(), "prefix registers as pending");
++    psp_vadd(0x08, 0x00, 0x04, 4);
++    CHECK(!psp_vfpu_prefix_pending(), "the prefix is consumed by the op");
++    get_quad(0x08, out);
++    CHECK_F(out[0], 14.0f, "swizzled lane 0");
++    CHECK_F(out[1], 17.0f, "swizzled, negated lane 1");
++    CHECK_F(out[3], 41.0f, "swizzled lane 3");
+ 
+-    /* With no prefix pending, arithmetic computes. */
++    /* T: constants 1/2 (swizzle 3), 3 (swizzle 0 + abs) in lanes 0 and 1. */
++    psp_vfpu_set_prefix(1, 0x03 | (1u << 9) | (1u << 12) | (1u << 13) | (0xE4 & 0xF0));
++    psp_vmul(0x08, 0x00, 0x04, 4);
++    get_quad(0x08, out);
++    CHECK_F(out[0], 0.5f, "constant 1/2");
++    CHECK_F(out[1], 6.0f, "constant 3 via abs");
++    CHECK_F(out[2], 90.0f, "unprefixed lane");
++
++    /* D: saturate lane 0 to [0,1], mask lane 3. */
++    const float keep[4] = { 7, 7, 7, 7 };
++    set_quad(0x08, keep);
++    psp_vfpu_set_prefix(2, 1u | (1u << 11));
+     psp_vadd(0x08, 0x00, 0x04, 4);
+-    CHECK(psp_vfpu_trap_count() == before, "no prefix, no trap");
++    get_quad(0x08, out);
++    CHECK_F(out[0], 1.0f, "saturated lane");
++    CHECK_F(out[1], 22.0f, "lane 1 unchanged by D");
++    CHECK_F(out[3], 7.0f, "masked lane not written");
+ 
+-    /* With one pending, it must trap instead of quietly ignoring it. */
+-    psp_vfpu_set_prefix(0, 0x00000055);
+-    CHECK(psp_vfpu_prefix_pending(), "prefix registers as pending");
++    /* No prefix: plain arithmetic, and no trap is ever counted. */
++    psp_vadd(0x08, 0x00, 0x04, 4);
++    get_quad(0x08, out);
++    CHECK_F(out[0], 11.0f, "no prefix after consumption");
++    CHECK(psp_vfpu_trap_count() == 0, "prefixed ops compute instead of trapping");
++}
+ 
+-    float before_out[4];
+-    get_quad(0x0C, before_out);
+-    psp_vadd(0x0C, 0x00, 0x04, 4);
++static void test_more_ops(void) {
++    psp_vfpu_reset();
++    float out[4];
++    const float x[4] = { 1, 0, 0, 0 }, y[4] = { 0, 1, 0, 0 };
++    set_quad(0x00, x);
++    set_quad(0x04, y);
+ 
+-    CHECK(psp_vfpu_trap_count() == before + 1,
+-          "a pending prefix traps rather than computing");
+-    CHECK(!psp_vfpu_prefix_pending(), "the prefix is consumed by the attempt");
++    psp_vcrsp(0x08, 0x00, 0x04, 3);                /* x cross y = z */
++    get_quad(0x08, out);
++    CHECK_F(out[0], 0.0f, "vcrsp x");
++    CHECK_F(out[2], 1.0f, "vcrsp z");
+ 
+-    float after_out[4];
+-    get_quad(0x0C, after_out);
+-    CHECK(memcmp(before_out, after_out, sizeof after_out) == 0,
+-          "the trapped op wrote nothing -- silently wrong output is the one "
+-          "outcome worse than an error");
++    const float p[4] = { 3, 4, 0, 0 }, q[4] = { 1, 2, 0, 0 };
++    set_quad(0x00, p);
++    set_quad(0x04, q);
++    psp_vdet(0x08, 0x00, 0x04, 2);
++    get_quad(0x08, out);
++    CHECK_F(out[0], 2.0f, "vdet 3*2 - 4*1");
++
++    psp_vhdp(0x08, 0x00, 0x04, 3);                 /* 3*1 + 4*2 + q.z(0) */
++    get_quad(0x08, out);
++    CHECK_F(out[0], 11.0f, "vhdp");
++
++    psp_vsge(0x08, 0x00, 0x04, 4);
++    get_quad(0x08, out);
++    CHECK_F(out[0], 1.0f, "vsge 3 >= 1");
++    CHECK_F(out[2], 1.0f, "vsge 0 >= 0");
++    psp_vslt(0x08, 0x04, 0x00, 4);
++    get_quad(0x08, out);
++    CHECK_F(out[1], 1.0f, "vslt 2 < 4");
++    CHECK_F(out[2], 0.0f, "vslt 0 < 0");
++
++    const float v[4] = { -2, 0, 5, 1 };
++    set_quad(0x00, v);
++    psp_vsgn(0x08, 0x00, 4);
++    get_quad(0x08, out);
++    CHECK_F(out[0], -1.0f, "vsgn negative");
++    CHECK_F(out[1], 0.0f, "vsgn zero");
++    CHECK_F(out[2], 1.0f, "vsgn positive");
++    psp_vfad(0x08, 0x00, 4);
++    get_quad(0x08, out);
++    CHECK_F(out[0], 4.0f, "vfad");
++    psp_vavg(0x08, 0x00, 4);
++    get_quad(0x08, out);
++    CHECK_F(out[0], 1.0f, "vavg");
++    psp_vocp(0x08, 0x00, 4);
++    get_quad(0x08, out);
++    CHECK_F(out[2], -4.0f, "vocp 1 - 5");
++
++    /* vrot.q with cosine in lane 0, sine in lane 1, at a quarter turn/2. */
++    const float ang[4] = { 0.5f, 0, 0, 0 };
++    set_quad(0x00, ang);
++    psp_vrot(0x08, 0x00, 4, (1u << 2) | 0u);
++    get_quad(0x08, out);
++    CHECK_F(out[0], 0.70710678f, "vrot cosine lane");
++    CHECK_F(out[1], 0.70710678f, "vrot sine lane");
++    CHECK_F(out[2], 0.0f, "vrot other lane");
++
++    /* vcmov: copy where CC bit 0 is set (tf = 0 means "if true"), per lane. */
++    const float src[4] = { 9, 9, 9, 9 }, dst[4] = { 1, 1, 1, 1 };
++    set_quad(0x00, src);
++    set_quad(0x08, dst);
++    psp_cpu.vfpu_cc = 0x5;                          /* lanes 0 and 2 */
++    psp_vcmov(0x08, 0x00, 4, 6u << 16);
++    get_quad(0x08, out);
++    CHECK_F(out[0], 9.0f, "vcmov lane 0 copied");
++    CHECK_F(out[1], 1.0f, "vcmov lane 1 kept");
++    CHECK_F(out[2], 9.0f, "vcmov lane 2 copied");
++
++    /* mfv/mtv round-trip, and the CC control register. */
++    psp_mtv(0x00, 0x40490FDBu);
++    CHECK(psp_mfv(0x00) == 0x40490FDBu, "mtv/mfv keep the bits");
++    psp_mtv(131, 0x21);
++    CHECK(psp_cpu.vfpu_cc == 0x21 && psp_mfv(131) == 0x21, "mtvc/mfvc on CC");
+ }
+ 
+ static void test_compare(void) {
+@@ -454,7 +540,8 @@ int main(void) {
+     test_register_addressing();
+     test_load_store();
+     test_arithmetic();
+-    test_prefix_traps();
++    test_prefixes();
++    test_more_ops();
+     test_compare();
+     test_matrix_ops();
+     test_matrix_transform();
+diff --git a/tools/allegrexrecomp/decode.c b/tools/allegrexrecomp/decode.c
+index f9d86c3..eb0b09f 100644
+--- a/tools/allegrexrecomp/decode.c
++++ b/tools/allegrexrecomp/decode.c
+@@ -239,6 +239,10 @@ static const a_opinfo OPINFO[A_OP_COUNT] = {
+     [A_VMIDT]    = { "vmidt",    F_VD_VS },
+     [A_VMZERO]   = { "vmzero",   F_VD_VS },
+     [A_VMONE]    = { "vmone",    F_VD_VS },
++    [A_VOCP]     = { "vocp",     F_VD_VS },
++    [A_VFAD]     = { "vfad",     F_VD_VS },
++    [A_VAVG]     = { "vavg",     F_VD_VS },
++    [A_VSGN]     = { "vsgn",     F_VD_VS },
+     [A_VPFXS]    = { "vpfxs",    F_UNKNOWN },
+     [A_VPFXT]    = { "vpfxt",    F_UNKNOWN },
+     [A_VPFXD]    = { "vpfxd",    F_UNKNOWN },
+@@ -542,10 +546,11 @@ int a_decode(uint32_t word, uint32_t addr, a_insn *out) {
+         switch ((word >> 23) & 7) {
+         case 0: op = A_VADD; break;
+         case 1: op = A_VSUB; break;
+-        /* vdiv is sub-opcode 4, not 7. An earlier revision had it at 7, which
+-         * both mis-decoded two real instructions and left actual vdiv falling
+-         * through as unknown. Corrected against the published encoding. */
+-        case 4: op = A_VDIV; break;
++        /* vdiv is sub-opcode 7 (0x638...): PPSSPP's tableVFPU0 and binutils'
++         * allegrex opcode table agree. An earlier revision moved it to 4,
++         * which left every real vdiv in MHFU (42 of them) as an unknown
++         * word that trapped. */
++        case 7: op = A_VDIV; break;
+         default: op = A_VFPU_UNKNOWN; break;
+         }
+         break;
+@@ -645,8 +650,17 @@ int a_decode(uint32_t word, uint32_t addr, a_insn *out) {
+         case 0x13: op = A_VF2ID; break;
+         case 0x14: op = A_VI2F;  break;
+         case 0x15: op = A_VCMOV; break;
+-        /* VFPU7 (rs=1) and VFPU9 (rs=2) are the conversion and shuffle
+-         * tables; mapped but not broken out yet. */
++        case 0x02:                                  /* VFPU9 */
++            switch (RT_F(word)) {
++            case 0x04: op = A_VOCP; break;
++            case 0x06: op = A_VFAD; break;
++            case 0x07: op = A_VAVG; break;
++            case 0x0A: op = A_VSGN; break;
++            default:   op = A_VFPU_UNKNOWN; break;
++            }
++            break;
++        /* VFPU7 (rs=1) is the conversion table; mapped but not broken out
++         * yet. */
+         default:   op = A_VFPU_UNKNOWN; break;
+         }
+         break;
+diff --git a/tools/allegrexrecomp/decode.h b/tools/allegrexrecomp/decode.h
+index 7abd57a..f4b1ea7 100644
+--- a/tools/allegrexrecomp/decode.h
++++ b/tools/allegrexrecomp/decode.h
+@@ -94,6 +94,8 @@ typedef enum {
+     /* VFPU6 (opcode 0x3C): the matrix unit. */
+     A_VMMUL, A_VTFM2, A_VTFM3, A_VTFM4, A_VMSCL, A_VCRSP, A_VROT,
+     A_VMMOV, A_VMIDT, A_VMZERO, A_VMONE,
++    /* VFPU9 (opcode 0x34, rs=2). */
++    A_VOCP, A_VFAD, A_VAVG, A_VSGN,
+     /* Any VFPU encoding we recognise as VFPU but do not yet name. Emitting
+      * these is a hard error rather than a silent wrong answer. */
+     A_VIIM,
+diff --git a/tools/allegrexrecomp/emit.c b/tools/allegrexrecomp/emit.c
+index 1ad599a..896728f 100644
+--- a/tools/allegrexrecomp/emit.c
++++ b/tools/allegrexrecomp/emit.c
+@@ -428,6 +428,32 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
+         fprintf(f, "%spsp_vscl(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
+     case A_VCMP:
+         fprintf(f, "%spsp_vcmp(%u, %u, %u, %u);\n", ind, in->vd & 0xF, in->vs, in->vt, in->vsize); return;
++    case A_VSGE: case A_VSLT: case A_VCRSP: case A_VCRS: case A_VDET: case A_VHDP: {
++        const char *fn = in->op == A_VSGE ? "vsge" : in->op == A_VSLT ? "vslt" :
++                         in->op == A_VCRSP ? "vcrsp" : in->op == A_VCRS ? "vcrs" :
++                         in->op == A_VDET ? "vdet" : "vhdp";
++        fprintf(f, "%spsp_%s(%u, %u, %u, %u);\n", ind, fn, in->vd, in->vs, in->vt, in->vsize);
++        return;
++    }
++    case A_VOCP: case A_VFAD: case A_VAVG: case A_VSGN: {
++        const char *fn = in->op == A_VOCP ? "vocp" : in->op == A_VFAD ? "vfad" :
++                         in->op == A_VAVG ? "vavg" : "vsgn";
++        fprintf(f, "%spsp_%s(%u, %u, %u);\n", ind, fn, in->vd, in->vs, in->vsize);
++        return;
++    }
++    case A_VCMOV:
++        fprintf(f, "%spsp_vcmov(%u, %u, %u, 0x%08Xu);\n", ind, in->vd, in->vs, in->vsize, in->raw);
++        return;
++    case A_VROT:
++        fprintf(f, "%spsp_vrot(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vsize, (in->raw >> 16) & 31);
++        return;
++    /* mfv/mtv: the low 8 bits name the register; 128 and up are the control
++     * registers (mfvc/mtvc). */
++    case A_MFV:
++        if (DEST_ZERO(in->rt)) break;
++        fprintf(f, "%s%s = psp_mfv(%u);\n", ind, rt, in->raw & 0xFF); return;
++    case A_MTV:
++        fprintf(f, "%spsp_mtv(%u, %s);\n", ind, in->raw & 0xFF, rt); return;
+ 
+     /* Prefixes gate the arithmetic above: with one pending, the next vector op
+      * traps instead of computing the unprefixed answer. Emitting these is what
+@@ -437,7 +463,7 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
+     case A_VMOV: case A_VABS: case A_VNEG: case A_VZERO: case A_VONE:
+     case A_VRCP: case A_VRSQ: case A_VSQRT: case A_VSIN: case A_VCOS:
+     case A_VEXP2: case A_VLOG2: case A_VSAT0: case A_VSAT1:
+-    case A_VNRCP: case A_VNSIN: case A_VASIN: {
++    case A_VNRCP: case A_VNSIN: case A_VASIN: case A_VREXP2: {
+         static const struct { a_op op; const char *sel; } U[] = {
+             { A_VMOV, "PSP_VU_MOV" },   { A_VABS, "PSP_VU_ABS" },
+             { A_VNEG, "PSP_VU_NEG" },   { A_VZERO,"PSP_VU_ZERO" },
+@@ -447,7 +473,7 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
+             { A_VEXP2,"PSP_VU_EXP2" },  { A_VLOG2,"PSP_VU_LOG2" },
+             { A_VSAT0,"PSP_VU_SAT0" },  { A_VSAT1,"PSP_VU_SAT1" },
+             { A_VNRCP,"PSP_VU_NRCP" },  { A_VNSIN,"PSP_VU_NSIN" },
+-            { A_VASIN,"PSP_VU_ASIN" },
++            { A_VASIN,"PSP_VU_ASIN" },  { A_VREXP2,"PSP_VU_REXP2" },
+         };
+         for (size_t k = 0; k < sizeof U / sizeof U[0]; k++) {
+             if (U[k].op != in->op) continue;

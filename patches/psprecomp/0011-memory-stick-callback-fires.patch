@@ -1,0 +1,64 @@
+diff --git a/include/psprecomp/hle.h b/include/psprecomp/hle.h
+index fce217f..387d3a3 100644
+--- a/include/psprecomp/hle.h
++++ b/include/psprecomp/hle.h
+@@ -233,6 +233,10 @@ void     psp_threadman_dump(FILE *out);
+  * that records a callback id (scePower's slots) has to ask first. */
+ int psp_callback_valid(uint32_t uid);
+ 
++/* sceKernelNotifyCallback from the host side: queue `arg` for callback `uid`
++ * (delivered at that thread's next callback point). -1 if no such callback. */
++int psp_callback_notify(uint32_t uid, uint32_t arg);
++
+ /* What delivery did, for a host's report: callbacks that ran, notifications
+  * dropped because the target is not a recompiled function, and passes that hit
+  * the per-tick ceiling. */
+diff --git a/src/hle/iofilemgr.c b/src/hle/iofilemgr.c
+index 65e0442..0db8da7 100644
+--- a/src/hle/iofilemgr.c
++++ b/src/hle/iofilemgr.c
+@@ -597,11 +597,22 @@ static void hle_Devctl(void) {
+         if (out && outlen >= 4) psp_write32(out, 1);
+         psp_ret(0);
+         return;
+-    case 0x02015804:              /* memory stick: register / unregister callback */
+-    case 0x02015805:
++    case 0x02015804:              /* memory stick: register the insert/eject callback */
+     case 0x02415821:
++        /* in = { callback uid }. Registering reports the current state at
++         * once, as the firmware does (and PPSSPP): 1, inserted. Games wait on
++         * that notification before touching savedata -- MHFU sits on
++         * "Checking for Memory Stick Duo" without it. */
++        if (in && inlen >= 4) {
++            uint32_t cb = psp_read32(in);
++            int ok = psp_callback_notify(cb, 1) == 0;
++            fprintf(stderr, "io: devctl \"%s\" 0x%08X: memory stick callback 0x%X %s\n",
++                    dev, cmd, cb, ok ? "notified: inserted" : "is not a callback");
++        }
++        psp_ret(0);
++        return;
++    case 0x02015805:              /* ...and unregister it */
+     case 0x02415822:
+-        fprintf(stderr, "io: devctl \"%s\" 0x%08X: memory stick callback accepted, never fires\n", dev, cmd);
+         psp_ret(0);
+         return;
+     case 0x02425818:              /* free space; in = { DeviceSize *ptr } */
+diff --git a/src/hle/threadman.c b/src/hle/threadman.c
+index bbfe36d..da3ff2e 100644
+--- a/src/hle/threadman.c
++++ b/src/hle/threadman.c
+@@ -1660,6 +1660,14 @@ static void hle_NotifyCallback(void) {
+     psp_ret(SCE_KERNEL_ERROR_OK);
+ }
+ 
++int psp_callback_notify(uint32_t uid, uint32_t arg) {
++    psp_callback *c = find_callback(uid);
++    if (!c) return -1;
++    c->notify_arg = arg;
++    if (c->notify_count < 0x7FFFFFFF) c->notify_count++;
++    return 0;
++}
++
+ static void hle_CheckCallback(void) {
+     /* The explicit check point, and the one a game uses to decide whether to
+      * keep polling: 1 if a callback ran, 0 if none was pending. */

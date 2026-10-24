@@ -1,0 +1,100 @@
+diff --git a/src/hle/threadman.c b/src/hle/threadman.c
+index 885f106..bbfe36d 100644
+--- a/src/hle/threadman.c
++++ b/src/hle/threadman.c
+@@ -785,13 +785,33 @@ static uint32_t wait_loop(int (*ready)(void *), void *ctx, uint64_t timeout_us,
+  * its reent pointer at $k0+4 (_getmodreent), so without it libc start-up fails.
+  * $sp starts below that block. */
+ #define THREAD_K0_SIZE 0x100u
++static uint32_t thread_k0(const psp_thread *t) {
++    return t->stack_base + t->stack_size - THREAD_K0_SIZE;
++}
++
++/* sceKernelStartThread copies the argument block onto the new thread's stack,
++ * just below the $k0 block, and the thread's $a1 points at the copy. Callers
++ * rely on that: they pass a pointer into their own stack frame, which is gone
++ * by the time the new thread runs. Returns the address to pass as $a1. */
++static uint32_t copy_thread_args(const psp_thread *t, uint32_t len, uint32_t src) {
++    if (!src || !len || len > t->stack_size / 2) return src;
++    uint32_t dst = (thread_k0(t) - len) & ~15u;
++    void *to = psp_mem_ptr(dst, len);
++    const void *from = psp_mem_ptr(src, len);
++    if (!to || !from) return src;
++    memmove(to, from, len);
++    return dst;
++}
++
+ static void thread_entry_regs(const psp_thread *t) {
+-    uint32_t k0 = t->stack_base + t->stack_size - THREAD_K0_SIZE;
++    uint32_t k0 = thread_k0(t);
+     void *blk = psp_mem_ptr(k0, THREAD_K0_SIZE);
+     if (blk) memset(blk, 0, THREAD_K0_SIZE);
++    /* Below the copied arguments when there are any, else below $k0. */
++    uint32_t top = (t->argp > t->stack_base && t->argp < k0) ? t->argp : k0;
+     psp_cpu.r[PSP_REG_K0] = k0;
+     psp_cpu.r[PSP_REG_GP] = t->gp;
+-    psp_cpu.r[PSP_REG_SP] = (k0 - 64) & ~15u;
++    psp_cpu.r[PSP_REG_SP] = (top - 64) & ~15u;
+ }
+ 
+ #if PSPRECOMP_REAL_THREADS
+@@ -934,8 +954,10 @@ static void hle_StartThread(void) {
+     int prev_intr = g_tls_intr_depth;
+     g_tls_intr_depth = 0;
+     g_current = g_tls_me = t;
+-    psp_cpu.r[PSP_REG_A0] = psp_arg(1);
+-    psp_cpu.r[PSP_REG_A1] = psp_arg(2);
++    t->arglen = psp_arg(1);
++    t->argp   = copy_thread_args(t, psp_arg(1), psp_arg(2));
++    psp_cpu.r[PSP_REG_A0] = t->arglen;
++    psp_cpu.r[PSP_REG_A1] = t->argp;
+     thread_entry_regs(t);
+     psp_cpu.r[PSP_REG_RA] = 0;
+     t->state = TH_RUNNING;
+@@ -963,7 +985,7 @@ static void hle_StartThread(void) {
+ #if PSPRECOMP_REAL_THREADS
+ 
+     t->arglen = psp_arg(1);
+-    t->argp   = psp_arg(2);
++    t->argp   = copy_thread_args(t, psp_arg(1), psp_arg(2));
+     t->state  = TH_READY;
+     /* Set before the host thread exists, so a park that happens between here and
+      * the new thread's first acquisition hands the CPU over instead of racing
+diff --git a/tests/test_thread_lifecycle.c b/tests/test_thread_lifecycle.c
+index 6b5b6da..59c7852 100644
+--- a/tests/test_thread_lifecycle.c
++++ b/tests/test_thread_lifecycle.c
+@@ -62,8 +62,11 @@ static void worker_entry(void) {
+ static void handler(void) { deliveries++; }
+ 
+ /* What a thread's entry sees in $gp, $k0 and $sp. */
+-static uint32_t seen_gp, seen_k0, seen_sp, seen_k0_word;
++static uint32_t seen_gp, seen_k0, seen_sp, seen_k0_word, seen_a0, seen_a1, seen_arg;
+ static void regs_entry(void) {
++    seen_a0 = psp_cpu.r[PSP_REG_A0];
++    seen_a1 = psp_cpu.r[PSP_REG_A1];
++    seen_arg = seen_a1 ? psp_read32(seen_a1) : 0;
+     seen_gp = psp_cpu.r[PSP_REG_GP];
+     seen_k0 = psp_cpu.r[PSP_REG_K0];
+     seen_sp = psp_cpu.r[PSP_REG_SP];
+@@ -79,12 +82,19 @@ static void test_regs(void) {
+     psp_cpu.r[PSP_REG_GP] = 0x089D3A80;
+     uint32_t id = create();
+     psp_cpu.r[PSP_REG_GP] = 0;   /* what matters is the value at create time */
+-    REQUIRE(call("sceKernelStartThread", id, 0, 0, 0) == 0);
++    /* The argument block lives in the caller's frame and is overwritten
++     * before the thread runs: the thread must see a copy. */
++    psp_write32(OUT + 0x100, 0xCAFEF00D);
++    REQUIRE(call("sceKernelStartThread", id, 4, OUT + 0x100, 0) == 0);
++    psp_write32(OUT + 0x100, 0xDEADDEAD);
+     REQUIRE(call("sceKernelWaitThreadEnd", id, OUT, 0, 0) == 0);
+     REQUIRE(seen_gp == 0x089D3A80);
+     REQUIRE(seen_k0 != 0 && (seen_k0 & 0xFF) == 0);
+     REQUIRE(seen_k0_word == 0);
+     REQUIRE(seen_sp < seen_k0 && (seen_sp & 15) == 0);
++    REQUIRE(seen_a0 == 4);
++    REQUIRE(seen_a1 != OUT + 0x100 && seen_a1 < seen_k0 && seen_a1 > seen_sp);
++    REQUIRE(seen_arg == 0xCAFEF00D);
+     REQUIRE(call("sceKernelDeleteThread", id, 0, 0, 0) == 0);
+     psp_threadman_reset();
+ }

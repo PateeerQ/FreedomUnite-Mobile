@@ -1,0 +1,86 @@
+diff --git a/include/psprecomp/dispatch.h b/include/psprecomp/dispatch.h
+--- a/include/psprecomp/dispatch.h
++++ b/include/psprecomp/dispatch.h
+@@ -26,6 +26,9 @@
+  * function it defines, from a single init routine. */
+ void psp_register(uint32_t addr, psp_fn_t fn);
+ void psp_register_label(uint32_t addr, psp_fn_t fn);
++/* Forget everything registered in [lo, hi): for overlays, code the game loads
++ * at run time over other code. Registering an address again restores it. */
++void psp_unregister_range(uint32_t lo, uint32_t hi);
+ void psp_dispatch_set_budget(uint64_t calls, void (*on_exceeded)(void));
+ uint64_t psp_dispatch_calls(void);
+ 
+diff --git a/src/dispatch.c b/src/dispatch.c
+--- a/src/dispatch.c
++++ b/src/dispatch.c
+@@ -78,7 +78,10 @@
+     uint32_t m = g_cap - 1;
+     uint32_t j = hash_addr(addr) & m;
+     while (g_table[j].used) {
+-        if (g_table[j].addr == addr) return;      /* already known: keep it */
++        if (g_table[j].addr == addr) {            /* already known: keep it */
++            if (!g_table[j].fn) g_table[j].fn = fn;   /* unless it was unregistered */
++            return;
++        }
+         j = (j + 1) & m;
+     }
+     g_table[j].addr = addr;
+@@ -87,6 +90,17 @@
+     g_count++;
+ }
+ 
++/* Forget every function and label in [lo, hi). The slots stay in the table
++ * with no function -- a lookup there is a miss, and registering the address
++ * again fills it -- so the probe chains of other entries are not broken. For
++ * code a game loads at run time over other code (overlays). */
++void psp_unregister_range(uint32_t lo, uint32_t hi) {
++    if (!g_table) return;
++    for (uint32_t i = 0; i < g_cap; i++)
++        if (g_table[i].used && g_table[i].addr >= lo && g_table[i].addr < hi)
++            g_table[i].fn = NULL;
++}
++
+ psp_fn_t psp_lookup(uint32_t addr) {
+     if (!g_table) return NULL;
+     uint32_t m = g_cap - 1;
+diff --git a/tests/test_hle.c b/tests/test_hle.c
+--- a/tests/test_hle.c
++++ b/tests/test_hle.c
+@@ -1041,6 +1041,28 @@
+     psp_ge_reset();
+ }
+ 
++/* ---- overlays: unregistering a range ------------------------------------------ */
++
++static void fake_ovl_a(void) {}
++static void fake_ovl_b(void) {}
++
++static void test_unregister_range(void) {
++    const uint32_t LO = 0x09C19000u;
++    psp_register(LO + 0x100, fake_ovl_a);
++    psp_register_label(LO + 0x180, fake_ovl_a);
++    psp_register(0x08804000u, fake_ovl_b);               /* outside: must survive */
++    psp_unregister_range(LO, LO + 0x1000);
++    CHECK(psp_lookup(LO + 0x100) == NULL && psp_lookup(LO + 0x180) == NULL,
++          "functions and labels in the range are gone");
++    CHECK(psp_lookup(0x08804000u) == fake_ovl_b, "outside the range is untouched");
++    psp_register(LO + 0x100, fake_ovl_b);
++    psp_register_label(LO + 0x180, fake_ovl_b);
++    CHECK(psp_lookup(LO + 0x100) == fake_ovl_b && psp_lookup(LO + 0x180) == fake_ovl_b,
++          "registering again restores both kinds");
++    psp_unregister_range(LO, LO + 0x1000);
++    psp_unregister_range(0x08804000u, 0x08804004u);
++}
++
+ int main(void) {
+     CHECK(psp_mem_init() == 0, "memory init");
+     psp_cpu_reset();
+@@ -1066,6 +1088,7 @@
+     test_callbacks();
+     test_disc_image();
+     test_ge_callbacks();
++    test_unregister_range();
+ 
+     psp_mem_free();
+ 

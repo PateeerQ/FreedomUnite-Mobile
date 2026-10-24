@@ -1,0 +1,123 @@
+diff --git a/src/hle/threadman.c b/src/hle/threadman.c
+index 97715ba..885f106 100644
+--- a/src/hle/threadman.c
++++ b/src/hle/threadman.c
+@@ -114,6 +114,7 @@ typedef struct {
+     uint32_t priority;
+     uint32_t stack_size;
+     uint32_t stack_base;   /* low address of the allocation */
++    uint32_t gp;           /* the creator's $gp: the module's small-data base */
+     uint32_t attr;
+     uint32_t arglen;       /* sceKernelStartThread arguments, held for the host */
+     uint32_t argp;
+@@ -777,6 +778,22 @@ static uint32_t wait_loop(int (*ready)(void *), void *ctx, uint64_t timeout_us,
+     }
+ }
+ 
++/* Registers the firmware sets for a thread before its entry runs, beyond the
++ * arguments. $gp is the module's small-data base: a thread started with $gp = 0
++ * reads its globals from address 0. $k0 points at a zeroed block at the top of
++ * the thread's stack, where the firmware keeps per-thread data; newlib keeps
++ * its reent pointer at $k0+4 (_getmodreent), so without it libc start-up fails.
++ * $sp starts below that block. */
++#define THREAD_K0_SIZE 0x100u
++static void thread_entry_regs(const psp_thread *t) {
++    uint32_t k0 = t->stack_base + t->stack_size - THREAD_K0_SIZE;
++    void *blk = psp_mem_ptr(k0, THREAD_K0_SIZE);
++    if (blk) memset(blk, 0, THREAD_K0_SIZE);
++    psp_cpu.r[PSP_REG_K0] = k0;
++    psp_cpu.r[PSP_REG_GP] = t->gp;
++    psp_cpu.r[PSP_REG_SP] = (k0 - 64) & ~15u;
++}
++
+ #if PSPRECOMP_REAL_THREADS
+ static void *guest_thread_main(void *arg) {
+     psp_thread *t = (psp_thread *)arg;
+@@ -791,9 +808,7 @@ static void *guest_thread_main(void *arg) {
+     psp_cpu_reset();
+     psp_cpu.r[PSP_REG_A0] = t->arglen;
+     psp_cpu.r[PSP_REG_A1] = t->argp;
+-    /* Stack pointer starts at the top of the allocation, 16-byte aligned, with
+-     * a little headroom so a callee storing below $sp cannot run off the end. */
+-    psp_cpu.r[PSP_REG_SP] = (t->stack_base + t->stack_size - 64) & ~15u;
++    thread_entry_regs(t);
+     psp_cpu.r[PSP_REG_RA] = 0;
+ 
+     t->state = TH_RUNNING;
+@@ -886,6 +901,7 @@ static void hle_CreateThread(void) {
+     if (!t->stack_base) { psp_ret(SCE_KERNEL_ERROR_NO_MEMORY); return; }
+ 
+     t->uid = g_next_uid++;
++    t->gp = psp_cpu.r[PSP_REG_GP];
+     t->state = TH_DORMANT;
+     t->used = 1;
+ 
+@@ -920,7 +936,7 @@ static void hle_StartThread(void) {
+     g_current = g_tls_me = t;
+     psp_cpu.r[PSP_REG_A0] = psp_arg(1);
+     psp_cpu.r[PSP_REG_A1] = psp_arg(2);
+-    psp_cpu.r[PSP_REG_SP] = (t->stack_base + t->stack_size - 64) & ~15u;
++    thread_entry_regs(t);
+     psp_cpu.r[PSP_REG_RA] = 0;
+     t->state = TH_RUNNING;
+     t->exited = t->terminated = t->delete_after = 0;
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index c793c99..a8fbc54 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -39,7 +39,7 @@ set_tests_properties(hle scheduler PROPERTIES TIMEOUT 60)
+ 
+ add_executable(test_thread_lifecycle test_thread_lifecycle.c)
+ target_link_libraries(test_thread_lifecycle PRIVATE psprecomp allegrex_core)
+-foreach(case delete pinned pending checkpoint0 checkpoint1 checkpoint2 checkpoint3 mask reset)
++foreach(case delete pinned pending checkpoint0 checkpoint1 checkpoint2 checkpoint3 mask reset regs)
+     add_test(NAME thread_${case} COMMAND test_thread_lifecycle ${case})
+     set_tests_properties(thread_${case} PROPERTIES TIMEOUT 60)
+ endforeach()
+diff --git a/tests/test_thread_lifecycle.c b/tests/test_thread_lifecycle.c
+index 5e52f37..6b5b6da 100644
+--- a/tests/test_thread_lifecycle.c
++++ b/tests/test_thread_lifecycle.c
+@@ -61,6 +61,34 @@ static void worker_entry(void) {
+ #endif
+ static void handler(void) { deliveries++; }
+ 
++/* What a thread's entry sees in $gp, $k0 and $sp. */
++static uint32_t seen_gp, seen_k0, seen_sp, seen_k0_word;
++static void regs_entry(void) {
++    seen_gp = psp_cpu.r[PSP_REG_GP];
++    seen_k0 = psp_cpu.r[PSP_REG_K0];
++    seen_sp = psp_cpu.r[PSP_REG_SP];
++    seen_k0_word = psp_read32(seen_k0 + 4);
++    psp_write32(seen_k0 + 4, 0x12345678);   /* newlib's reent slot: must be writable */
++    psp_cpu.r[PSP_REG_V0] = 0;
++}
++
++/* A started thread inherits its creator's $gp (the module's small-data base)
++ * and gets a zeroed $k0 block at the top of its stack, with $sp below it. */
++static void test_regs(void) {
++    psp_register(ENTRY, regs_entry);
++    psp_cpu.r[PSP_REG_GP] = 0x089D3A80;
++    uint32_t id = create();
++    psp_cpu.r[PSP_REG_GP] = 0;   /* what matters is the value at create time */
++    REQUIRE(call("sceKernelStartThread", id, 0, 0, 0) == 0);
++    REQUIRE(call("sceKernelWaitThreadEnd", id, OUT, 0, 0) == 0);
++    REQUIRE(seen_gp == 0x089D3A80);
++    REQUIRE(seen_k0 != 0 && (seen_k0 & 0xFF) == 0);
++    REQUIRE(seen_k0_word == 0);
++    REQUIRE(seen_sp < seen_k0 && (seen_sp & 15) == 0);
++    REQUIRE(call("sceKernelDeleteThread", id, 0, 0, 0) == 0);
++    psp_threadman_reset();
++}
++
+ /* WaitThreadEnd delivers ticks before testing readiness. Creating from that
+  * tick must not reuse an ExitDelete record the waiter has not consumed yet. */
+ static void reclaim_handler(void) {
+@@ -179,6 +207,7 @@ int main(int argc, char **argv) {
+         test_terminate(0);
+     } else if (!strcmp(argv[1], "mask")) test_mask();
+     else if (!strcmp(argv[1], "reset")) test_reset();
++    else if (!strcmp(argv[1], "regs")) test_regs();
+     else REQUIRE(0);
+     printf("thread lifecycle %s: passed (real_threads=%d)\n",
+            argv[1], PSPRECOMP_REAL_THREADS);

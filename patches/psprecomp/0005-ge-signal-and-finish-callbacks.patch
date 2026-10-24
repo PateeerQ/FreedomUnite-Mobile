@@ -1,0 +1,301 @@
+diff --git a/include/psprecomp/hle.h b/include/psprecomp/hle.h
+--- a/include/psprecomp/hle.h
++++ b/include/psprecomp/hle.h
+@@ -149,6 +149,11 @@
+ uint64_t psp_ge_command_count(void);
+ uint64_t psp_ge_vertex_count(void);
+ uint64_t psp_ge_pixels(void);
++/* Run GE signal/finish callbacks raised by finished lists, if the current
++ * thread has interrupts enabled. Called after EnQueue, at CpuResumeIntr and at
++ * every wait point. */
++void     psp_ge_deliver_pending(void);
++uint64_t psp_ge_callbacks_run(void);
+ 
+ void psp_sas_init(void);
+ void psp_sas_register(void);
+diff --git a/src/hle/ge.c b/src/hle/ge.c
+--- a/src/hle/ge.c
++++ b/src/hle/ge.c
+@@ -26,6 +26,7 @@
+ 
+ #include "psprecomp/hle.h"
+ #include "psprecomp/render.h"
++#include "psprecomp/dispatch.h"
+ 
+ #include <math.h>
+ #include <stdio.h>
+@@ -113,11 +114,76 @@
+     uint32_t origin;
+     int      used;
+     int      done;
++    int32_t  cbid;      /* sceGeSetCallback id from EnQueue, -1 for none */
+ } ge_queue;
+ 
+ static ge_queue g_queue[MAX_QUEUES];
+ static uint32_t g_next_id;
+ 
++/* ---- callbacks ---------------------------------------------------------------
++ *
++ * sceGeSetCallback registers a signal and a finish handler; a list enqueued
++ * with that callback id raises the finish handler when it reaches FINISH, and
++ * the signal handler at a SIGNAL whose behaviour asks for one. Games wait on
++ * these: MHFU clears a byte, enqueues its frame list, and spins on the byte
++ * until its finish handler sets it -- a loop with no call in it, so no wait
++ * point would ever deliver anything.
++ *
++ * Lists run to completion inside EnQueue, so the interrupt is raised there.
++ * It is delivered as soon as the raising thread has interrupts enabled: at
++ * once, or when it leaves its CpuSuspendIntr bracket, or at the next wait. */
++
++#define MAX_GE_CB      16
++#define MAX_GE_PENDING 32
++
++typedef struct { int used; uint32_t signal_func, signal_arg, finish_func, finish_arg; } ge_cb;
++typedef struct { uint32_t func, a0, a1, a2; } ge_intr;
++
++static ge_cb    g_cb[MAX_GE_CB];
++static ge_intr  g_pending[MAX_GE_PENDING];
++static int      g_pending_n;
++static int      g_ge_delivering;
++static uint64_t g_ge_callbacks_run;
++
++static void raise_intr(uint32_t func, uint32_t a0, uint32_t a1, uint32_t a2) {
++    if (!func) return;
++    if (g_pending_n == MAX_GE_PENDING) {
++        fprintf(stderr, "psprecomp: GE callback queue full, dropping 0x%08X\n", func);
++        return;
++    }
++    g_pending[g_pending_n++] = (ge_intr){ func, a0, a1, a2 };
++}
++
++void psp_ge_deliver_pending(void) {
++    if (g_ge_delivering || !g_pending_n || psp_threadman_intr_disabled()) return;
++    g_ge_delivering = 1;
++    while (g_pending_n) {
++        ge_intr in = g_pending[0];
++        memmove(g_pending, g_pending + 1, (size_t)--g_pending_n * sizeof g_pending[0]);
++        if (!psp_lookup(in.func)) {
++            fprintf(stderr, "psprecomp: GE callback 0x%08X is not a recompiled function\n", in.func);
++            continue;
++        }
++        /* handler(id, arg, list pc), with the interrupted registers kept, as
++         * intrman.c does for sub-interrupts. */
++        psp_cpu_state saved = psp_cpu;
++        psp_cpu.r[PSP_REG_A0] = in.a0;
++        psp_cpu.r[PSP_REG_A1] = in.a1;
++        psp_cpu.r[PSP_REG_A2] = in.a2;
++        psp_cpu.r[PSP_REG_RA] = 0;
++        psp_call_from_host(in.func);
++        psp_cpu = saved;
++        g_ge_callbacks_run++;
++    }
++    g_ge_delivering = 0;
++}
++
++uint64_t psp_ge_callbacks_run(void) { return g_ge_callbacks_run; }
++
++static const ge_cb *queue_cb(const ge_queue *q) {
++    return (q->cbid >= 0 && q->cbid < MAX_GE_CB && g_cb[q->cbid].used) ? &g_cb[q->cbid] : NULL;
++}
++
+ static uint64_t g_unsupported;     /* vertices in a format we do not read */
+ 
+ /* Draw state handed to the backend with every primitive, and the raw words it
+@@ -189,6 +255,10 @@
+ 
+ void psp_ge_reset(void) {
+     memset(g_queue, 0, sizeof g_queue);
++    memset(g_cb, 0, sizeof g_cb);
++    g_pending_n = 0;
++    g_ge_delivering = 0;
++    g_ge_callbacks_run = 0;
+     memset(&g_ge, 0, sizeof g_ge);
+     memset(&g_ds, 0, sizeof g_ds);
+     memset(g_clut, 0, sizeof g_clut);
+@@ -480,7 +550,11 @@
+ 
+         case GE_END:
+         case GE_FINISH:
+-            if (cmd == GE_FINISH) g_ge.finishes++;
++            if (cmd == GE_FINISH) {
++                const ge_cb *cb = queue_cb(q);
++                g_ge.finishes++;
++                if (cb) raise_intr(cb->finish_func, arg & 0xFFFF, cb->finish_arg, q->list);
++            }
+             /* A finished list gives its slot back. Keeping it used meant the
+              * ninth enqueue failed, and WTF then dropped 3,870 of 3,885
+              * frames while running at full speed. */
+@@ -488,10 +562,17 @@
+             q->used = 0;
+             return;
+ 
+-        case GE_SIGNAL:
+-            /* Raises a callback on hardware. Callbacks are not delivered yet
+-             * (no scheduler), so this is recorded and ignored. */
++        case GE_SIGNAL: {
++            /* Behaviour in bits 16-23. SUSPEND (1) and CONTINUE (2) call the
++             * signal handler; with the list already run to completion the two
++             * look the same. The 0x10-0x13 behaviours (sync, jump, call, ret)
++             * never raise one. */
++            const ge_cb *cb = queue_cb(q);
++            uint32_t behaviour = (arg >> 16) & 0xFF;
++            if (cb && (behaviour == 1 || behaviour == 2))
++                raise_intr(cb->signal_func, arg & 0xFFFF, cb->signal_arg, q->list);
+             break;
++        }
+ 
+         case GE_BASE:        q->base = (arg & 0xFF0000) << 8; break;
+         case GE_ORIGIN_ADDR: q->origin = q->list - 4; break;
+@@ -644,6 +725,7 @@
+     q->list  = psp_arg(0) & ~3u;
+     q->stall = psp_arg(1) & ~3u;
+     q->used  = 1;
++    q->cbid  = (int32_t)psp_arg(2);
+     (void)head;
+ 
+     /* Hardware runs the list asynchronously. We run it here and finish before
+@@ -652,6 +734,7 @@
+      * reports completion. */
+     run_list(q);
+     psp_ret(q->id);
++    psp_ge_deliver_pending();
+ }
+ 
+ static void hle_ListEnQueue(void)     { enqueue(0); }
+@@ -670,18 +753,39 @@
+     q->stall = psp_arg(1) & ~3u;
+     if (!q->done) run_list(q);          /* the new stall released more commands */
+     psp_ret(SCE_KERNEL_ERROR_OK);
++    psp_ge_deliver_pending();
+ }
+ 
+ /* Lists are complete by the time they are enqueued, so every sync succeeds
+  * immediately. */
+-static void hle_ListSync(void) { psp_ret(SCE_KERNEL_ERROR_OK); }
+-static void hle_DrawSync(void) { psp_ret(SCE_KERNEL_ERROR_OK); }
++static void hle_ListSync(void) { psp_ge_deliver_pending(); psp_ret(SCE_KERNEL_ERROR_OK); }
++static void hle_DrawSync(void) { psp_ge_deliver_pending(); psp_ret(SCE_KERNEL_ERROR_OK); }
+ 
+ static void hle_Break(void)    { psp_ret(SCE_KERNEL_ERROR_OK); }
+ static void hle_Continue(void) { psp_ret(SCE_KERNEL_ERROR_OK); }
+ 
+-static void hle_SetCallback(void)   { psp_ret(0); }
+-static void hle_UnsetCallback(void) { psp_ret(SCE_KERNEL_ERROR_OK); }
++/* (PspGeCallbackData *): { signal_func, signal_arg, finish_func, finish_arg } */
++static void hle_SetCallback(void) {
++    uint32_t d = psp_arg(0);
++    for (int i = 0; i < MAX_GE_CB; i++) {
++        if (g_cb[i].used) continue;
++        g_cb[i].used = 1;
++        g_cb[i].signal_func = psp_read32(d + 0);
++        g_cb[i].signal_arg  = psp_read32(d + 4);
++        g_cb[i].finish_func = psp_read32(d + 8);
++        g_cb[i].finish_arg  = psp_read32(d + 12);
++        psp_ret((uint32_t)i);
++        return;
++    }
++    psp_ret(SCE_KERNEL_ERROR_NO_MEMORY);
++}
++
++static void hle_UnsetCallback(void) {
++    uint32_t id = psp_arg(0);
++    if (id >= MAX_GE_CB) { psp_ret(0x80000100); return; }   /* invalid id */
++    g_cb[id].used = 0;
++    psp_ret(SCE_KERNEL_ERROR_OK);
++}
+ 
+ /* eDRAM is the GPU-visible VRAM window: 2 MB at 0x04000000. */
+ static void hle_EdramGetAddr(void) { psp_ret(PSP_VRAM_BASE); }
+diff --git a/src/hle/intrman.c b/src/hle/intrman.c
+--- a/src/hle/intrman.c
++++ b/src/hle/intrman.c
+@@ -134,6 +134,7 @@
+      * achieves anyway. */
+     if (g_delivering) return;
+     if (psp_threadman_intr_disabled()) return;
++    psp_ge_deliver_pending();
+     g_delivering = 1;
+ 
+     for (int i = 0; i < MAX_SUBINTR; i++) {
+diff --git a/src/hle/misc.c b/src/hle/misc.c
+--- a/src/hle/misc.c
++++ b/src/hle/misc.c
+@@ -28,6 +28,7 @@
+ static void hle_CpuResumeIntr(void) {
+     psp_threadman_intr_resume(psp_arg(0));
+     psp_ret(SCE_KERNEL_ERROR_OK);
++    psp_ge_deliver_pending();          /* a GE interrupt raised inside the bracket */
+ }
+ 
+ /* ---- UtilsForUser -------------------------------------------------------- */
+diff --git a/tests/test_hle.c b/tests/test_hle.c
+--- a/tests/test_hle.c
++++ b/tests/test_hle.c
+@@ -988,6 +988,59 @@
+     remove(iso);
+ }
+ 
++/* ---- GE callbacks -------------------------------------------------------------
++ *
++ * The MHFU shape: clear a flag, enqueue a list with a callback id, spin until
++ * the finish handler sets the flag. The handler must run before the spin. */
++
++static uint32_t g_ge_fin_a0, g_ge_fin_a1;
++static int      g_ge_fin_calls, g_ge_sig_calls;
++static void fake_ge_finish(void) {
++    g_ge_fin_calls++;
++    g_ge_fin_a0 = psp_cpu.r[PSP_REG_A0];
++    g_ge_fin_a1 = psp_cpu.r[PSP_REG_A1];
++    psp_cpu.r[PSP_REG_A0] = 0xDEAD;          /* clobber: the caller must not see it */
++}
++static void fake_ge_signal(void) { g_ge_sig_calls++; }
++
++static void test_ge_callbacks(void) {
++    psp_ge_reset();
++    const uint32_t FIN = 0x0000B000u, SIG = 0x0000B100u;
++    const uint32_t DATA = 0x08902000u, LIST = 0x08903000u;
++    psp_register(FIN, fake_ge_finish);
++    psp_register(SIG, fake_ge_signal);
++
++    psp_write32(DATA + 0, SIG);  psp_write32(DATA + 4, 0x11);
++    psp_write32(DATA + 8, FIN);  psp_write32(DATA + 12, 0x22);
++    uint32_t cbid = call(psp_nid("sceGeSetCallback"), DATA, 0, 0, 0);
++    CHECK(cbid < 16, "SetCallback returns an id, got 0x%08X", cbid);
++
++    psp_write32(LIST + 0, 0x0E010007u);      /* SIGNAL, behaviour SUSPEND, data 7 */
++    psp_write32(LIST + 4, 0x0F000005u);      /* FINISH 5 */
++    psp_write32(LIST + 8, 0x0C000000u);      /* END */
++    g_ge_fin_calls = g_ge_sig_calls = 0;
++    call(psp_nid("sceGeListEnQueue"), LIST, 0, cbid, 0);
++    CHECK(g_ge_fin_calls == 1 && g_ge_sig_calls == 1, "EnQueue raised finish and signal (%d, %d)",
++          g_ge_fin_calls, g_ge_sig_calls);
++    CHECK(g_ge_fin_a0 == 5 && g_ge_fin_a1 == 0x22, "finish handler gets (data, finish_arg)");
++    CHECK(psp_cpu.r[PSP_REG_A0] == LIST, "the caller's registers survive the handler");
++
++    /* No callback id: nothing is raised. */
++    g_ge_fin_calls = 0;
++    call(psp_nid("sceGeListEnQueue"), LIST, 0, (uint32_t)-1, 0);
++    CHECK(g_ge_fin_calls == 0, "a list without a callback raises nothing");
++
++    /* Inside a CpuSuspendIntr bracket the interrupt waits for the resume. */
++    uint32_t cookie = call(psp_nid("sceKernelCpuSuspendIntr"), 0, 0, 0, 0);
++    call(psp_nid("sceGeListEnQueue"), LIST, 0, cbid, 0);
++    CHECK(g_ge_fin_calls == 0, "not delivered while interrupts are off");
++    call(psp_nid("sceKernelCpuResumeIntr"), cookie, 0, 0, 0);
++    CHECK(g_ge_fin_calls == 1, "delivered at CpuResumeIntr");
++
++    CHECK(call(psp_nid("sceGeUnsetCallback"), cbid, 0, 0, 0) == 0, "unset");
++    psp_ge_reset();
++}
++
+ int main(void) {
+     CHECK(psp_mem_init() == 0, "memory init");
+     psp_cpu_reset();
+@@ -1012,6 +1065,7 @@
+     test_sub_interrupts();
+     test_callbacks();
+     test_disc_image();
++    test_ge_callbacks();
+ 
+     psp_mem_free();
+ 

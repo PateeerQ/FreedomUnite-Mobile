@@ -1,0 +1,89 @@
+diff --git a/tools/allegrexrecomp/main.c b/tools/allegrexrecomp/main.c
+--- a/tools/allegrexrecomp/main.c
++++ b/tools/allegrexrecomp/main.c
+@@ -33,7 +33,7 @@
+         "  allegrexrecomp dis     <file> [start-addr] [count]\n"
+         "  allegrexrecomp cover   <file>\n"
+         "  allegrexrecomp funcs   <file> [--list]\n"
+-        "  allegrexrecomp emit    <file> <outdir> [prefix]\n"
++        "  allegrexrecomp emit    <file> <outdir> [prefix] [--seeds FILE]\n"
+         "  allegrexrecomp dump    <file> <addr>\n"
+         "  allegrexrecomp decrypt <file> [--keys <path>]\n"
+         "  allegrexrecomp kirk1   <file> [out] [--keys <path>]\n"
+@@ -458,6 +458,40 @@
+ /* Load a decrypted module and run discovery over it. On success the caller
+  * owns both `b` (psp_blob_free) and `an` (a_analysis_free). Shared by `funcs`
+  * and `emit`, which differ only in what they do with the result. */
++/* --seeds FILE: extra function entries, one hex address per line ('#' starts
++ * a comment). For code that nothing inside the module reaches -- a function
++ * only ever called from an overlay the game loads at run time is invisible to
++ * discovery over the module alone. Seeds outside the image are ignored. */
++static const char *g_seeds_path;
++
++static int read_extra_seeds(uint32_t lo, uint32_t hi, uint32_t **out) {
++    *out = NULL;
++    if (!g_seeds_path) return 0;
++    FILE *f = fopen(g_seeds_path, "r");
++    if (!f) { fprintf(stderr, "cannot read seeds file %s\n", g_seeds_path); return -1; }
++    int n = 0, cap = 0, skipped = 0;
++    char line[128];
++    while (fgets(line, sizeof line, f)) {
++        char *hash = strchr(line, '#');
++        if (hash) *hash = '\0';
++        char *end;
++        unsigned long v = strtoul(line, &end, 16);
++        if (end == line) continue;
++        uint32_t a = (uint32_t)v;
++        if (a < lo || a >= hi || (a & 3)) { skipped++; continue; }
++        if (n == cap) {
++            cap = cap ? cap * 2 : 256;
++            uint32_t *bigger = (uint32_t *)realloc(*out, (size_t)cap * sizeof **out);
++            if (!bigger) { fclose(f); free(*out); *out = NULL; return -1; }
++            *out = bigger;
++        }
++        (*out)[n++] = a;
++    }
++    fclose(f);
++    printf("extra seeds: %d from %s (%d outside the image, ignored)\n", n, g_seeds_path, skipped);
++    return n;
++}
++
+ static int load_and_discover(const char *path, psp_blob *b, elf_info *e,
+                              a_analysis *an, int *out_nseeds, int *out_nexports,
+                              int *out_nptr, int *out_scanned) {
+@@ -557,6 +591,18 @@
+         }
+     }
+ 
++    uint32_t *extra = NULL;
++    int nextra = read_extra_seeds(an->base, an->base + an->size, &extra);
++    if (nextra > 0) {
++        uint32_t *bigger = (uint32_t *)realloc(seeds, (size_t)(nseeds + nextra) * sizeof *seeds);
++        if (bigger) {
++            seeds = bigger;
++            memcpy(seeds + nseeds, extra, (size_t)nextra * sizeof *seeds);
++            nseeds += nextra;
++        }
++    }
++    free(extra);
++
+     int rc = a_discover(an, seeds, nseeds);
+     free(seeds);
+     if (rc != 0) {
+@@ -989,6 +1035,16 @@
+ 
+     const char *cmd = argv[1];
+ 
++    /* --seeds FILE may follow funcs, emit and dump; it is taken out of argv so
++     * the positional arguments keep their places. */
++    for (int i = 2; i + 1 < argc; i++) {
++        if (strcmp(argv[i], "--seeds")) continue;
++        g_seeds_path = argv[i + 1];
++        for (int k = i; k + 2 < argc; k++) argv[k] = argv[k + 2];
++        argc -= 2;
++        break;
++    }
++
+     if (!strcmp(cmd, "info"))    return cmd_info(argv[2]);
+     if (!strcmp(cmd, "ls"))      return cmd_ls(argv[2]);
+     if (!strcmp(cmd, "cover"))   return cmd_cover(argv[2]);

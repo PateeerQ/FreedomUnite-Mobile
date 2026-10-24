@@ -1,0 +1,43 @@
+# Build output
+build/
+out/
+*.obj
+*.exe
+*.pdb
+*.ilk
+
+# Everything made from the game: extracted disc, decrypted EBOOT, emitted C,
+# captures. Never committed.
+work/
+mhfu/
+
+# Game data is never committed -- bring your own dump
+*.iso
+*.cso
+*.7z
+*.zip
+*.pbp
+*.prx
+EBOOT.BIN
+*_EBOOT.BIN
+BOOT.BIN
+DATA.BIN
+*.ppm
+
+# PSP decryption keys are not distributed -- supply your own
+keys/
+*.keys
+
+# Loose psprecomp download (the submodule at psprecomp/ replaces it)
+psprecomp-*/
+
+# Editor / OS
+.vs/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+__pycache__/
+
+# Miscellaneous
+CLAUDE.md

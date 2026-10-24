@@ -1,0 +1,109 @@
+diff --git a/include/psprecomp/hle.h b/include/psprecomp/hle.h
+index b875fe8..fce217f 100644
+--- a/include/psprecomp/hle.h
++++ b/include/psprecomp/hle.h
+@@ -141,6 +141,9 @@ void psp_display_reset(void);
+ int      psp_display_capture(const char *path);
+ uint64_t psp_display_vblanks(void);
+ uint32_t psp_display_framebuffer(void);
++/* The framebuffer as last set: address, stride in pixels, pixel format
++ * (0 565, 1 5551, 2 4444, 3 8888). For a host that shows frames itself. */
++void     psp_display_get(uint32_t *addr, uint32_t *stride, uint32_t *format);
+ 
+ void psp_ge_init(void);
+ void psp_ge_register(void);
+@@ -257,6 +260,11 @@ void psp_intrman_reset(void);
+  * the vblank wait -- since with no timer there is nothing else to hook. Safe to
+  * call from inside a handler: delivery does not re-enter. */
+ void psp_intr_tick(void);
++/* A host function run at the end of every tick that delivers interrupts, with
++ * the same guard: interrupts enabled, and never re-entered. For hardware a
++ * game drives that the HLE does not model, such as timers with handlers.
++ * NULL removes it. */
++void psp_intr_set_host_tick(void (*fn)(void));
+ 
+ /* 0 until a game registers a handler, and the first number worth looking at
+  * when a wait never ends. */
+diff --git a/src/hle/display.c b/src/hle/display.c
+index d12e158..c3af6d4 100644
+--- a/src/hle/display.c
++++ b/src/hle/display.c
+@@ -46,6 +46,12 @@ void psp_display_init(void) { psp_display_reset(); }
+ uint64_t psp_display_vblanks(void) { return g_vblank_count; }
+ uint32_t psp_display_framebuffer(void) { return g_fb_addr; }
+ 
++void psp_display_get(uint32_t *addr, uint32_t *stride, uint32_t *format) {
++    if (addr)   *addr = g_fb_addr;
++    if (stride) *stride = g_fb_width;
++    if (format) *format = g_fb_format;
++}
++
+ /* Write the current framebuffer as a binary PPM. Returns 0 on success, -1 if
+  * no framebuffer has been set yet (which is itself worth knowing during
+  * bring-up: the game never got as far as showing anything). */
+diff --git a/src/hle/intrman.c b/src/hle/intrman.c
+index 76a817e..0e64cfb 100644
+--- a/src/hle/intrman.c
++++ b/src/hle/intrman.c
+@@ -54,6 +54,9 @@ static uint64_t   g_deliveries;
+ static uint64_t   g_unresolved;
+ static int        g_unresolved_logged;
+ static int        g_delivering;   /* reentrancy guard: see psp_intr_tick */
++static void     (*g_host_tick)(void);
++
++void psp_intr_set_host_tick(void (*fn)(void)) { g_host_tick = fn; }
+ 
+ void psp_intrman_init(void) { psp_intrman_reset(); }
+ 
+@@ -167,6 +170,7 @@ void psp_intr_tick(void) {
+         g_deliveries++;
+     }
+ 
++    if (g_host_tick) g_host_tick();
+     g_delivering = 0;
+ }
+ 
+diff --git a/tests/test_hle.c b/tests/test_hle.c
+index 8ccc27e..1961848 100644
+--- a/tests/test_hle.c
++++ b/tests/test_hle.c
+@@ -1063,6 +1063,31 @@ static void test_unregister_range(void) {
+     psp_unregister_range(0x08804000u, 0x08804004u);
+ }
+ 
++/* ---- the host tick ------------------------------------------------------------ */
++
++static int g_host_ticks;
++static void count_host_tick(void) { g_host_ticks++; psp_intr_tick(); /* must not recurse */ }
++
++static void test_host_tick(void) {
++    g_host_ticks = 0;
++    psp_intr_set_host_tick(count_host_tick);
++    psp_intr_tick();
++    psp_intr_tick();
++    CHECK(g_host_ticks == 2, "host tick runs once per interrupt tick, not re-entered");
++    int cookie = psp_threadman_intr_suspend();
++    psp_intr_tick();
++    CHECK(g_host_ticks == 2, "host tick does not run with interrupts disabled");
++    psp_threadman_intr_resume((uint32_t)cookie);
++    psp_intr_set_host_tick(NULL);
++    psp_intr_tick();
++    CHECK(g_host_ticks == 2, "NULL removes it");
++
++    uint32_t a = 1, w = 1, f = 9;
++    psp_display_reset();
++    psp_display_get(&a, &w, &f);
++    CHECK(a == 0 && w == 512 && f == 3, "display_get reports the reset framebuffer");
++}
++
+ int main(void) {
+     CHECK(psp_mem_init() == 0, "memory init");
+     psp_cpu_reset();
+@@ -1089,6 +1114,7 @@ int main(void) {
+     test_disc_image();
+     test_ge_callbacks();
+     test_unregister_range();
++    test_host_tick();
+ 
+     psp_mem_free();
+ 
