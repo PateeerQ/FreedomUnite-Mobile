@@ -433,9 +433,11 @@ int main(int argc, char **argv) {
             }
         }
         else fprintf(stderr, "no window (only on Windows); running without one\n");
-        if (mhfu_gamepad_start() != 0) fprintf(stderr, "no controller support in this build\n");
-        /* Sound only with a window: scripted runs without one stay quiet. */
+        /* Sound only with a window: scripted runs without one stay quiet. It
+         * starts first: both it and the controllers initialise SDL, and the
+         * controllers do so on a thread of their own. */
         if (mhfu_audio_start() != 0) fprintf(stderr, "no audio output; running silent\n");
+        if (mhfu_gamepad_start() != 0) fprintf(stderr, "no controller support in this build\n");
     }
 
     printf("running from 0x%08X (budget %llu calls, %d s)\n\n", img.entry, budget, g_seconds);
