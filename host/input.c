@@ -44,20 +44,15 @@ static long long wall_ns(void) {
 }
 
 /* Wait out the rest of this frame's 1/60 s. If the host falls behind, the
- * clock restarts instead of rushing to catch up. */
+ * clock restarts instead of rushing to catch up. The wait yields the CPU: a
+ * host sleep here kept it from every other guest thread for most of the frame,
+ * because the scheduler is cooperative. */
 static void pace(void) {
     static long long next;
     long long now = wall_ns();
     if (!next || now - next > 10 * FRAME_NS) next = now;
     next += FRAME_NS;
-    long long wait = next - now;
-    if (wait <= 0) return;
-#ifdef _WIN32
-    Sleep((DWORD)(wait / 1000000));
-#else
-    struct timespec d = { 0, (long)wait };
-    nanosleep(&d, NULL);
-#endif
+    while (wall_ns() < next) psp_threadman_yield();
 }
 
 void mhfu_input_set_pacing(int on) { g_pacing = on; }
