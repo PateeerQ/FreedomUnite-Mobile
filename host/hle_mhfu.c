@@ -99,8 +99,12 @@ static void hle_CacheRange(void) { psp_ret(0); }
 
 /* ---- ThreadManForUser: virtual timers ---------------------------------------
  *
- * A VTimer counts microseconds while started. Time is the scheduler's virtual
- * clock, the same one sceKernelDelayThread advances.
+ * A VTimer counts microseconds while started, on the host's monotonic clock.
+ * It used to count the scheduler's virtual clock, but every thread's park adds
+ * its own timeout to that one clock, so with MHFU's ten threads it ran several
+ * times faster than real time. The frame handler then woke user_main more often
+ * than it could sleep, user_main never parked, and the loader and sound threads
+ * starved: "Now Loading" never finished.
  *
  * A handler fires once the timer's count reaches its schedule:
  *
@@ -137,8 +141,17 @@ static vtimer *find_vt(uint32_t uid) {
     return (i < MAX_VTIMERS && g_vt[i].used) ? &g_vt[i] : NULL;
 }
 
+uint64_t mhfu_clock_us(void) {
+    struct timespec ts;
+    timespec_get(&ts, TIME_UTC);
+    static uint64_t start;
+    uint64_t t = (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+    if (!start) start = t;
+    return t - start;
+}
+
 static uint64_t vt_now(const vtimer *v) {
-    return v->accum_us + (v->running ? psp_threadman_vtime_us() - v->base_us : 0);
+    return v->accum_us + (v->running ? mhfu_clock_us() - v->base_us : 0);
 }
 
 static void ret64(uint64_t x) {
@@ -217,7 +230,7 @@ static void hle_StartVTimer(void) {
     if (!v) { psp_ret(SCE_KERNEL_ERROR_UNKNOWN_VTID); return; }
     if (v->running) { psp_ret(1); return; }
     v->running = 1;
-    v->base_us = psp_threadman_vtime_us();
+    v->base_us = mhfu_clock_us();
     psp_ret(0);
 }
 
