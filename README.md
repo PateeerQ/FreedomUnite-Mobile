@@ -83,7 +83,7 @@ Q = L, W = R, Space/Enter = Start, V/Backspace = Select, I/J/K/L = stick.
 The game is held to 60 frames a second there.
 
 There is no on-screen keyboard: when the game asks for text (the character
-name) it gets `-Name`, `Hunter` by default: `.\scripts\run.ps1 -Window -Name "Fathir"`.
+name) it gets `-Name`, `Hunter` by default: `.\scripts\run.ps1 -Window -Name "Pateeer"`.
 
 Without a window, `-Press "300:CROSS,420:START"` presses buttons at given game
 frames (one controller read each, held 6 frames; `500-560:UP` holds a range)
