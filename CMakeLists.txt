@@ -36,6 +36,25 @@ if(MSVC)
     target_compile_definitions(mhfu_ovl PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
 
+# The room network (ad hoc multiplayer, see host/net/proto.h): a library the
+# host links, the standalone hub for a server, and a check that runs it end to
+# end without the game.
+add_library(mhfu_net STATIC host/net/sys.c host/net/hub.c host/net/client.c)
+target_include_directories(mhfu_net PUBLIC host)
+set_target_properties(mhfu_net PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+if(WIN32)
+    target_link_libraries(mhfu_net PUBLIC ws2_32 advapi32)
+    target_compile_definitions(mhfu_net PRIVATE _CRT_SECURE_NO_WARNINGS _WINSOCK_DEPRECATED_NO_WARNINGS)
+else()
+    find_package(Threads REQUIRED)
+    target_link_libraries(mhfu_net PUBLIC Threads::Threads)
+endif()
+add_executable(mhfu_hub tools/mhfu_hub.c)
+target_link_libraries(mhfu_hub PRIVATE mhfu_net)
+add_executable(mhfu_netcheck tools/mhfu_netcheck.c)
+target_link_libraries(mhfu_netcheck PRIVATE mhfu_net)
+set_target_properties(mhfu_hub mhfu_netcheck PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+
 # --- the host -------------------------------------------------------------------
 
 file(GLOB MHFU_GEN_SOURCES CONFIGURE_DEPENDS "${MHFU_GEN_DIR}/*.c")
@@ -60,9 +79,10 @@ else()
 endif()
 list(APPEND MHFU_GEN_SOURCES ${MHFU_OVL_SOURCES})
 
-add_executable(mhfu_host host/main.c host/hle_mhfu.c host/input.c host/window.c host/libfont.c host/utility.c ${MHFU_GEN_SOURCES})
+add_executable(mhfu_host host/main.c host/hle_mhfu.c host/input.c host/window.c host/libfont.c host/utility.c
+               host/adhoc.c host/lobby.c host/audio.c host/atrac.c ${MHFU_GEN_SOURCES})
 target_include_directories(mhfu_host PRIVATE "${MHFU_GEN_DIR}" host)
-target_link_libraries(mhfu_host PRIVATE psprecomp)
+target_link_libraries(mhfu_host PRIVATE psprecomp mhfu_net)
 if(WIN32)
     target_link_libraries(mhfu_host PRIVATE user32 gdi32)
 endif()
