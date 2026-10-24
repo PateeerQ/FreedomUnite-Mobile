@@ -1,0 +1,1850 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index e1a4317..0752fd0 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -38,6 +38,7 @@ add_library(psprecomp STATIC
+     src/dispatch.c
+     src/ctors.c
+     src/render.c
++    src/render_gl.c
+     src/vfpu.c
+     src/traps.c
+     src/hle/hle.c
+@@ -69,7 +70,8 @@ target_compile_definitions(psprecomp PUBLIC
+ if(PSPRECOMP_REAL_THREADS AND WIN32)
+     target_link_libraries(psprecomp PUBLIC winmm)   # timeBeginPeriod
+ endif()
+-if(PSPRECOMP_REAL_THREADS AND NOT WIN32)
++# render_gl.c's render thread needs threads whatever the scheduler.
++if(NOT WIN32)
+     find_package(Threads REQUIRED)
+     target_link_libraries(psprecomp PUBLIC Threads::Threads)
+ endif()
+diff --git a/docs/RENDERER.md b/docs/RENDERER.md
+index 845d031..9a7c2ea 100644
+--- a/docs/RENDERER.md
++++ b/docs/RENDERER.md
+@@ -64,6 +64,10 @@ typedef struct {
+ 
+     /* Present whatever has accumulated (sceDisplaySetFrameBuf). */
+     void (*present)(void);
++
++    /* The last frame shown, for backends whose pixels are not in guest
++     * memory (psp_display_capture). NULL: read memory. */
++    int  (*capture)(uint32_t *rgba);
+ } psp_render_backend;
+ ```
+ 
+@@ -79,7 +83,38 @@ backend is wrong the same way, which is at least diagnosable.
+ |---|---|---|
+ | **software** | Working | The reference. Triangles, strips, fans and sprites; textures (all non-DXT formats, swizzle, CLUTs) through the shared `psp_tex_fetch()`; texture function, alpha test, blend, clear mode, scissor. Tests assert pixel positions and colours. No depth, no GPU, no dependencies, runs in CI. |
+ | **null** | Working | Counts primitives, draws nothing. What the bring-up host uses when the question is "did it ask to draw". |
+-| **sdl3-vulkan** | Not started | The intended presentation path. See below. |
++| **gl** | Working | `src/render_gl.c`: GL 3.3 core or GLES 3.0, at an integer multiple of 480x272. See below. |
++| **sdl3-vulkan** | Not started | See below. |
++
++## The GL backend
++
++Shaped like PPSSPP's GPU backends (read for reference, none of its code):
++
++- **Render thread.** The GE runs on whichever guest thread submitted a list,
++  and a context can be current on one thread only. So the GE side records
++  commands (framebuffer binds, texture uploads, draws with their state already
++  turned into GL enums) and `present` hands the frame to a render thread that
++  owns the context, one frame behind. The host supplies the context through
++  `psp_gl_host` (create, `get_proc`, swap, drawable size) and calls
++  `psp_render_gl_start()`.
++- **Framebuffer manager.** Each framebuffer address the GE draws to is an FBO
++  (colour texture plus depth). `present` shows the FBO at the display address,
++  or guest memory when the GE never drew there (a CPU-drawn screen). A texture
++  whose address lies inside a drawn framebuffer samples that FBO: render to
++  texture with no readback.
++- **Texture cache.** Decoded through `psp_tex_fetch()`, keyed by address,
++  format, size, buffer width, swizzle and a hash of the CLUT; the memory is
++  re-hashed once a frame (and whenever a small texture is bound anew) and
++  re-decoded when it changed.
++- **Pixels.** One shader does `fragment()`'s work in the same order: texture
++  function, colour doubling, fog, alpha test. Blend, depth test and write,
++  scissor and the clear mode's masks are GL state. The framebuffer's alpha is
++  the source alpha, as in the software backend.
++
++Missing: points and lines, stencil, colour test, logic ops, dithering, mipmaps,
++the CPU reading a framebuffer, block transfers into one, and blend modes GL has
++no factor for (doubled alphas, absolute difference, two different fixed
++colours), which are approximated.
+ 
+ ## The SDL3 + Vulkan backend, when it happens
+ 
+diff --git a/include/psprecomp/render.h b/include/psprecomp/render.h
+index ad3f269..09070c7 100644
+--- a/include/psprecomp/render.h
++++ b/include/psprecomp/render.h
+@@ -28,6 +28,9 @@ typedef struct {
+     float    z, w;
+     /* Fog factor, 1 = none, 0 = all fog colour (FOG1/FOG2 on view-space z). */
+     float    fog;
++    /* x and y before rounding to pixels, for backends that rasterise with
++     * subpixel precision. */
++    float    fx, fy;
+ } psp_vertex;
+ 
+ /* GE primitive types, from the PRIM argument's type field. */
+@@ -69,6 +72,8 @@ typedef struct {
+     int      tex_alpha;      /* TFUNC bit 8: texture alpha is used */
+     int      tex_double;     /* TFUNC bit 16: colour doubling */
+     uint32_t tex_env;        /* TEC, for the blend function */
++    int      tex_min_linear; /* TFLT bit 0 (the software backend always samples nearest) */
++    int      tex_mag_linear; /* TFLT bit 8 */
+ 
+     const uint8_t *clut;     /* bytes captured at the last CLOAD */
+     int      clut_fmt;       /* CMODE bits 0-1 */
+@@ -114,6 +119,10 @@ typedef struct {
+ 
+     /* sceDisplaySetFrameBuf -- show what has accumulated. */
+     void (*present)(void);
++
++    /* The last frame shown, 480x272 as 0xAABBGGRR, for backends whose pixels
++     * are not in guest memory. 0 on success; NULL or -1 means "read memory". */
++    int  (*capture)(uint32_t *rgba);
+ } psp_render_backend;
+ 
+ /* Select a backend by name ("software", "null", ...). Returns 0 on success,
+@@ -126,6 +135,26 @@ const psp_render_backend *psp_render_current(void);
+ /* Backends provided by the runtime. */
+ extern const psp_render_backend psp_render_software;
+ extern const psp_render_backend psp_render_null;
++extern const psp_render_backend psp_render_gl;
++
++/* The OpenGL backend (src/render_gl.c): GL 3.3 core or GLES 3.0, on a render
++ * thread of its own. The host owns the window and the context; these are
++ * called on the render thread. */
++typedef struct {
++    void *user;
++    int   gles;                                     /* GLES 3.0 shaders */
++    int   (*init)(void *user);                      /* create the context, make it current; 0 = ok */
++    void *(*get_proc)(void *user, const char *name);
++    void  (*swap)(void *user);
++    void  (*size)(void *user, int *w, int *h);      /* the drawable, in pixels */
++} psp_gl_host;
++
++/* Start the render thread; `scale` is the internal resolution (1 = 480x272).
++ * 0 when the context works, after which psp_render_select("gl") uses it. */
++int  psp_render_gl_start(const psp_gl_host *host, int scale);
++/* An image drawn over the top-left corner of every frame (the host's FPS
++ * line), 0xAABBGGRR; NULL removes it. Any thread. */
++void psp_render_gl_overlay(const uint32_t *rgba, int w, int h);
+ 
+ /* Pixels written by the active backend -- the proof of life during bring-up. */
+ uint64_t psp_render_pixels(void);
+diff --git a/src/hle/display.c b/src/hle/display.c
+index 4f75e0c..29449e8 100644
+--- a/src/hle/display.c
++++ b/src/hle/display.c
+@@ -59,6 +59,21 @@ void psp_display_get(uint32_t *addr, uint32_t *stride, uint32_t *format) {
+ int psp_display_capture(const char *path) {
+     if (!g_fb_addr) return -1;
+ 
++    /* A GPU backend's pixels are not in guest memory: ask it. */
++    static uint32_t shot[PSP_SCREEN_W * PSP_SCREEN_H];
++    const psp_render_backend *be = psp_render_current();
++    if (be->capture && be->capture(shot) == 0) {
++        FILE *f = fopen(path, "wb");
++        if (!f) return -1;
++        fprintf(f, "P6\n%d %d\n255\n", PSP_SCREEN_W, PSP_SCREEN_H);
++        for (int i = 0; i < PSP_SCREEN_W * PSP_SCREEN_H; i++) {
++            uint8_t rgb[3] = { (uint8_t)shot[i], (uint8_t)(shot[i] >> 8), (uint8_t)(shot[i] >> 16) };
++            fwrite(rgb, 1, 3, f);
++        }
++        fclose(f);
++        return 0;
++    }
++
+     FILE *f = fopen(path, "wb");
+     if (!f) return -1;
+     fprintf(f, "P6\n%d %d\n255\n", PSP_SCREEN_W, PSP_SCREEN_H);
+@@ -112,6 +127,7 @@ static void hle_SetFrameBuf(void) {
+     g_fb_width  = psp_arg(1);
+     g_fb_format = psp_arg(2);
+     if (!g_fb_width) g_fb_width = 512;
++    psp_render_current()->present();
+     psp_ret(SCE_KERNEL_ERROR_OK);
+ }
+ 
+diff --git a/src/hle/ge.c b/src/hle/ge.c
+index e832937..676f085 100644
+--- a/src/hle/ge.c
++++ b/src/hle/ge.c
+@@ -122,6 +122,7 @@
+ #define GE_TPSM         0xC3
+ #define GE_CLOAD        0xC4
+ #define GE_CMODE        0xC5
++#define GE_TFLT         0xC6
+ #define GE_TWRAP        0xC7
+ #define GE_TFUNC        0xC9
+ #define GE_TEC          0xCA
+@@ -384,6 +385,8 @@ static void clip_to_screen(const float c[4], psp_vertex *out) {
+     if (sy < -100000.0f) sy = -100000.0f; else if (sy > 100000.0f) sy = 100000.0f;
+     out->x = (int)floorf(sx);
+     out->y = (int)floorf(sy);
++    out->fx = sx;
++    out->fy = sy;
+     out->z = c[2] * iw * g_xf.zscale + g_xf.zpos;
+     out->w = iw;
+ }
+@@ -749,6 +752,8 @@ static void read_vertex(uint32_t addr, uint32_t vtype, const vlayout *L, cvertex
+         out->v.u = uv[0]; out->v.v = uv[1];
+         out->v.x = (int)pos[0];
+         out->v.y = (int)pos[1];
++        out->v.fx = (float)out->v.x;
++        out->v.fy = (float)out->v.y;
+         out->v.z = pos[2];
+         out->v.w = 0;
+         out->c[0] = out->c[1] = out->c[2] = 0; out->c[3] = 1;
+@@ -1286,6 +1291,10 @@ static void run_list(ge_queue *q) {
+             break;
+         case GE_TMODE: g_ds.tex_swizzle = arg & 1; break;
+         case GE_TPSM:  g_ds.tex_fmt = (int)(arg & 0xF); break;
++        case GE_TFLT:
++            g_ds.tex_min_linear = arg & 1;
++            g_ds.tex_mag_linear = (arg >> 8) & 1;
++            break;
+         case GE_TWRAP:
+             g_ds.tex_clamp_u = arg & 1;
+             g_ds.tex_clamp_v = (arg >> 8) & 1;
+diff --git a/src/hle/intrman.c b/src/hle/intrman.c
+index 0e64cfb..fa7ca6e 100644
+--- a/src/hle/intrman.c
++++ b/src/hle/intrman.c
+@@ -36,10 +36,42 @@
+ 
+ #include <stdio.h>
+ #include <string.h>
++#include <time.h>
+ 
+ #define MAX_SUBINTR 64
+ #define INTR_LOG    8   /* how many problems to name before counting silently */
+ 
++/* VBLANK is a clock rather than an event: it comes 59.94 times a second
++ * whatever the guest does, and games count it to pace themselves. MHFU's frame
++ * loop waits for two (30 fps); delivered at every wait like the others, two
++ * came at once and the game ran twice as fast. So it is delivered once per
++ * vblank of real time that has passed, with a short backlog caught up. */
++#define PSP_VBLANK_INT     30
++#define VBLANK_PERIOD_NS   16683333ll       /* 1001/60 ms */
++#define VBLANK_CATCHUP     2
++
++static long long g_vblank_start_ns;
++static uint64_t  g_vblanks_done;
++
++static long long intr_now_ns(void) {
++    struct timespec ts;
++    timespec_get(&ts, TIME_UTC);
++    return (long long)ts.tv_sec * 1000000000ll + ts.tv_nsec;
++}
++
++/* How many vblanks to deliver now: 0, or 1 for each period that ended since
++ * the last delivery, up to the catch-up limit (older ones are dropped). */
++static int vblanks_due(void) {
++    const long long now = intr_now_ns();
++    if (!g_vblank_start_ns) { g_vblank_start_ns = now; g_vblanks_done = 0; }
++    const uint64_t passed = (uint64_t)((now - g_vblank_start_ns) / VBLANK_PERIOD_NS);
++    if (passed <= g_vblanks_done) return 0;
++    uint64_t n = passed - g_vblanks_done;
++    if (n > VBLANK_CATCHUP) n = VBLANK_CATCHUP;
++    g_vblanks_done = passed;
++    return (int)n;
++}
++
+ typedef struct {
+     int      intr;
+     int      subintr;
+@@ -66,6 +98,7 @@ void psp_intrman_reset(void) {
+     g_unresolved = 0;
+     g_unresolved_logged = 0;
+     g_delivering = 0;
++    g_vblank_start_ns = 0;
+ }
+ 
+ static psp_subintr *find_subintr(int intr, int subintr) {
+@@ -140,10 +173,10 @@ void psp_intr_tick(void) {
+     psp_ge_deliver_pending();
+     g_delivering = 1;
+ 
++    const int vblanks = vblanks_due();
+     for (int i = 0; i < MAX_SUBINTR; i++) {
+         psp_subintr *s = &g_sub[i];
+         if (!s->used || !s->enabled) continue;
+-
+         if (!psp_lookup(s->handler)) {
+             /* Worth naming loudly: the guest registered a handler we cannot
+              * call, which means the address is not in the recompiled set and
+@@ -160,14 +193,18 @@ void psp_intr_tick(void) {
+             continue;
+         }
+ 
+-        psp_cpu_state saved = psp_cpu;
+-        psp_cpu.r[PSP_REG_A0] = (uint32_t)s->subintr;   /* handler(subintr, arg) */
+-        psp_cpu.r[PSP_REG_A1] = s->arg;
+-        psp_cpu.r[PSP_REG_RA] = 0;
+-        psp_call_from_host(s->handler);
+-        psp_cpu = saved;
+-
+-        g_deliveries++;
++        /* One delivery per tick; VBLANK once per vblank that came due. */
++        const int times = s->intr == PSP_VBLANK_INT ? vblanks : 1;
++        for (int k = 0; k < times; k++) {
++            psp_cpu_state saved = psp_cpu;
++            psp_cpu.r[PSP_REG_A0] = (uint32_t)s->subintr;   /* handler(subintr, arg) */
++            psp_cpu.r[PSP_REG_A1] = s->arg;
++            psp_cpu.r[PSP_REG_RA] = 0;
++            psp_call_from_host(s->handler);
++            psp_cpu = saved;
++
++            g_deliveries++;
++        }
+     }
+ 
+     if (g_host_tick) g_host_tick();
+diff --git a/src/hle/threadman.c b/src/hle/threadman.c
+index 49c5ad8..8c3d2de 100644
+--- a/src/hle/threadman.c
++++ b/src/hle/threadman.c
+@@ -1105,12 +1105,19 @@ static void hle_DelayThread(void) {
+  * VTimers in between, so everything the wakeup depends on keeps running. */
+ static void hle_SleepThread(void) {
+     psp_thread *t = g_tls_me;
++#if PSPRECOMP_REAL_THREADS
+     if (!t) { deliver_tick(); psp_ret(SCE_KERNEL_ERROR_OK); return; }
+     while (t->wakeups == 0) {
+         park_for(W_SLEEP, TICK_US);
+         deliver_tick();
+     }
+     t->wakeups--;
++#else
++    /* Inline mode runs a thread to its end inside StartThread: nothing can
++     * wake it while it waits, so a sleep stays one tick long. */
++    if (t && t->wakeups) t->wakeups--;
++    deliver_tick();
++#endif
+     psp_ret(SCE_KERNEL_ERROR_OK);
+ }
+ 
+diff --git a/src/render.c b/src/render.c
+index 5e759a9..867cba2 100644
+--- a/src/render.c
++++ b/src/render.c
+@@ -490,7 +490,7 @@ const psp_render_backend *psp_render_current(void) { return g_backend; }
+ 
+ int psp_render_select(const char *name) {
+     static const psp_render_backend *const all[] = {
+-        &psp_render_software, &psp_render_null
++        &psp_render_software, &psp_render_null, &psp_render_gl
+     };
+     if (!name) return -1;
+     for (size_t i = 0; i < sizeof all / sizeof all[0]; i++) {
+diff --git a/src/vfpu.c b/src/vfpu.c
+index 4260093..a9f798c 100644
+--- a/src/vfpu.c
++++ b/src/vfpu.c
+@@ -511,24 +511,38 @@ void psp_vmscl(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
+  * columns are the transformed basis vectors, so transforming (1,0,0,0) yields
+  * column 0. That property is what the test pins, and it is the one that
+  * distinguishes this from its transpose. */
++/* vtfmN / vhtfmN: out[i] = dot(column i of the matrix, t), for each of the
++ * matrix's `side` columns -- PPSSPP's Int_Vtfm, whose ReadMatrix is the same
++ * [col][row] order as matrix_read. This used to sum over columns per row,
++ * which is the transposed matrix: a rotation by the opposite angle. MHFU
++ * turns its hunter's facing into a walking direction with it, so the hunter
++ * walked mirrored about a diagonal from where it faced.
++ *
++ * `size` is the vector size n, with the matrix side in bits 4-6 (the emitter
++ * puts it there; 0 means side = n, which is what code emitted before did).
++ * n < side is the homogeneous form: t gets a 1 after its last element. */
+ void psp_vtfm(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
+     vdone();     /* prefixes do not apply to matrix ops */
++    const int n = size & 7;
++    const int side = (size >> 4) & 7 ? (size >> 4) & 7 : n;
+     float m[4][4];
+     int d[4], t[4];
+-    matrix_read(vs, size, m);
+-    psp_vfpu_regs(vt, size, t);
+-    psp_vfpu_regs(vd, size, d);
+-
+-    float in[4], out[4];
+-    for (int i = 0; i < size; i++) in[i] = psp_cpu.v[t[i]];
+-    for (int r = 0; r < size; r++) {
++    matrix_read(vs, side, m);
++    const int tn = n < side ? n : side;
++    psp_vfpu_regs(vt, tn, t);
++    psp_vfpu_regs(vd, side, d);
++
++    float in[4] = { 0, 0, 0, 0 }, out[4];
++    for (int k = 0; k < tn; k++) in[k] = psp_cpu.v[t[k]];
++    if (tn < side) in[side - 1] = 1.0f;
++    for (int i = 0; i < side; i++) {
+         float sum = 0.0f;
+-        for (int c = 0; c < size; c++) sum += m[c][r] * in[c];
+-        out[r] = sum;
++        for (int k = 0; k < side; k++) sum += m[i][k] * in[k];
++        out[i] = sum;
+     }
+     /* vd may be one of the sources, so write only after the whole result is
+      * computed. */
+-    for (int r = 0; r < size; r++) psp_cpu.v[d[r]] = out[r];
++    for (int i = 0; i < side; i++) psp_cpu.v[d[i]] = out[i];
+ }
+ 
+ /* Matrix product: Md = Ms^T * Mt. The first operand is used transposed, which
+@@ -690,19 +704,35 @@ void psp_vhdp(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
+ 
+ /* vrot: a rotation row from one angle (in quarter turns). imm bits 0-1 name
+  * the cosine lane, 2-3 the sine lane (all lanes when they are equal), bit 4
+- * negates the sine; other lanes are zero. */
++ * negates the sine; other lanes are zero.
++ *
++ * The hardware's quirks, as PPSSPP's interpreter has them from hardware
++ * tests: the S prefix reaches the sine only, and without its negate; the
++ * cosine is of the raw register; the D prefix skips the cosine lane; and when
++ * vd and vs are in the same matrix, the cosine is taken of whatever the row
++ * already put in vs's lane. */
+ void psp_vrot(uint32_t vd, uint32_t vs, int size, uint32_t imm) {
+     if (compat_new_op("vrot")) return;
+-    float s[4];
+-    vread(0, vs, 1, s);
+-    const float a = s[0] * 1.5707963267948966f;
+-    float sine = sinf(a), cosine = cosf(a);
++    int sr[4], dr[4];
++    psp_vfpu_regs(vs, 1, sr);
++    const float raw = psp_cpu.v[sr[0]];
++    float s[4] = { raw, 0, 0, 0 };
++    if (g_prefix_set[0]) apply_st(g_prefix[0] & ~0x000F0000u, s, 1);
++    const float q = 1.5707963267948966f;
++    float sine = sinf(s[0] * q);
++    const float cosine = cosf(raw * q);
+     if (imm & 0x10) sine = -sine;
+     const int sl = (int)(imm >> 2) & 3, cl = (int)imm & 3;
+     float d[4] = { 0, 0, 0, 0 };
+     if (sl == cl) for (int i = 0; i < 4; i++) d[i] = sine;
+     else d[sl] = sine;
+     d[cl] = cosine;
++    if (((vd >> 2) & 7) == ((vs >> 2) & 7)) {
++        const int n = psp_vfpu_regs(vd, size, dr);
++        for (int i = 0; i < n; i++)
++            if (dr[i] == sr[0]) { d[cl] = cosf(d[i] * q); break; }
++    }
++    if (g_prefix_set[2]) g_prefix[2] &= ~((3u << (cl * 2)) | (1u << (8 + cl)));
+     diag("vrot", s, d);
+     vwrite(vd, size, d);
+ }
+diff --git a/tests/test_hle.c b/tests/test_hle.c
+index 117ee2f..ce6f04e 100644
+--- a/tests/test_hle.c
++++ b/tests/test_hle.c
+@@ -347,12 +347,15 @@ static void test_threads(void) {
+           (unsigned long long)psp_threadman_handovers(),
+           (unsigned long long)psp_threadman_handover_expired());
+ 
+-    /* A sleep with nothing to wake it still ends, one tick later. That is the
+-     * approximation that keeps a `while (!flag) sleep();` poll alive: the
+-     * faithful alternative is a thread that never returns, and a run that
+-     * stops with no evidence in it. */
++#if PSPRECOMP_REAL_THREADS
++    /* A sleep lasts until a wakeup, as on hardware: returning after a tick
++     * let a game's worker run ahead of the thread that was to wake it. */
+     call(DELAY, 1000, 0, 0, 0);
+-    CHECK(g_sleeper_stage == 2, "a sleep nothing wakes returns after its tick");
++    CHECK(g_sleeper_stage == 1, "a sleep nothing wakes keeps sleeping (stage=%d)", g_sleeper_stage);
++    CHECK(call(WAKEUP, sid, 0, 0, 0) == 0, "wakeup succeeds");
++    CHECK(call(WAITEND, sid, 0, 0, 0) == 0, "and the woken sleeper reaches its end");
++#endif
++    CHECK(g_sleeper_stage == 2, "a woken sleep returns (inline: after its tick)");
+ 
+     /* A wakeup is not lost when it arrives before the sleep: a producer that
+      * wakes a worker it has not started waiting yet must not have to guess. */
+@@ -705,7 +708,7 @@ static void test_sub_interrupts(void) {
+     CHECK(psp_intr_enabled() == 0, "and starts disabled, as it does on hardware");
+ 
+     /* Registered but not enabled: a wait must not deliver. */
+-    call(psp_nid("sceKernelSleepThread"), 0, 0, 0, 0);
++    call(psp_nid("sceKernelDelayThread"), 0, 0, 0, 0);
+     CHECK(g_handler_calls == 0 && psp_intr_deliveries() == 0,
+           "a disabled handler is not called");
+ 
+@@ -713,7 +716,7 @@ static void test_sub_interrupts(void) {
+           "enable returns the previous state (0 = was disabled)");
+     CHECK(psp_intr_enabled() == 1, "handler enabled");
+ 
+-    call(psp_nid("sceKernelSleepThread"), 0, 0, 0, 0);
++    call(psp_nid("sceKernelDelayThread"), 0, 0, 0, 0);
+     CHECK(g_handler_calls == 1 && psp_intr_deliveries() == 1,
+           "the wait delivers one interrupt");
+     CHECK(g_handler_sub == 2 && g_handler_arg == 0x1234,
+@@ -721,10 +724,11 @@ static void test_sub_interrupts(void) {
+     CHECK(psp_cpu.r[PSP_REG_A0] == 0 && psp_cpu.r[PSP_REG_A1] == 0,
+           "the interrupted context's registers survive the handler");
+ 
+-    /* A delay and a vblank wait are the other two delivery points. */
++    /* A vblank wait is another delivery point. (SleepThread is one too, but it
++     * lasts until a wakeup now, so these waits are delays.) */
+     call(psp_nid("sceKernelDelayThread"), 0, 0, 0, 0);
+     call(psp_nid("sceDisplayWaitVblank"), 0, 0, 0, 0);
+-    CHECK(g_handler_calls == 3, "DelayThread and the vblank wait deliver too");
++    CHECK(g_handler_calls == 3, "a second delay and the vblank wait deliver too");
+ 
+     /* Reentrancy: a handler that waits is serviced later, not recursively. */
+     g_handler_calls = 0;
+@@ -732,7 +736,7 @@ static void test_sub_interrupts(void) {
+     psp_register(FN, fake_subintr_handler_that_waits);
+     call(psp_nid("sceKernelRegisterSubIntrHandler"), 1, 2, FN, 0);
+     call(psp_nid("sceKernelEnableSubIntr"), 1, 2, 0, 0);
+-    call(psp_nid("sceKernelSleepThread"), 0, 0, 0, 0);
++    call(psp_nid("sceKernelDelayThread"), 0, 0, 0, 0);
+     CHECK(g_handler_calls == 1, "a handler that waits does not re-enter delivery");
+ 
+     /* A handler address that discovery never found is counted and named, not
+@@ -740,7 +744,7 @@ static void test_sub_interrupts(void) {
+     psp_intrman_reset();
+     call(psp_nid("sceKernelRegisterSubIntrHandler"), 1, 2, 0x0000BEEFu, 0);
+     call(psp_nid("sceKernelEnableSubIntr"), 1, 2, 0, 0);
+-    call(psp_nid("sceKernelSleepThread"), 0, 0, 0, 0);
++    call(psp_nid("sceKernelDelayThread"), 0, 0, 0, 0);
+     CHECK(psp_intr_unresolved() == 1 && psp_intr_deliveries() == 0,
+           "an unrecompiled handler address is counted as unresolved");
+ 
+@@ -752,7 +756,7 @@ static void test_sub_interrupts(void) {
+     call(psp_nid("sceKernelEnableSubIntr"), 1, 2, 0, 0);
+     CHECK(call(psp_nid("sceKernelReleaseSubIntrHandler"), 1, 2, 0, 0) == 0,
+           "release");
+-    call(psp_nid("sceKernelSleepThread"), 0, 0, 0, 0);
++    call(psp_nid("sceKernelDelayThread"), 0, 0, 0, 0);
+     CHECK(g_handler_calls == 0 && psp_intr_handlers() == 0,
+           "a released handler is not called");
+ }
+diff --git a/tests/test_thread_lifecycle.c b/tests/test_thread_lifecycle.c
+index 59c7852..4d70dcf 100644
+--- a/tests/test_thread_lifecycle.c
++++ b/tests/test_thread_lifecycle.c
+@@ -178,6 +178,8 @@ static void test_mask(void) {
+     call("sceKernelDelayThread", 1, 0, 0, 0);
+     REQUIRE(deliveries == 0);
+     psp_threadman_intr_resume((uint32_t)inner);
++    /* A sleep lasts until a wakeup; a pending one lets this sleep return. */
++    call("sceKernelWakeupThread", call("sceKernelGetThreadId", 0, 0, 0, 0), 0, 0, 0);
+     call("sceKernelSleepThread", 0, 0, 0, 0);
+     REQUIRE(deliveries == 0);
+     psp_threadman_intr_resume((uint32_t)outer);
+diff --git a/tests/test_vfpu.c b/tests/test_vfpu.c
+index 61d3ac9..fcc25ea 100644
+--- a/tests/test_vfpu.c
++++ b/tests/test_vfpu.c
+@@ -383,9 +383,12 @@ static void test_matrix_transform(void) {
+     psp_vfpu_reset();
+     float m[4][4], v[4];
+ 
+-    /* Transforming a basis vector must yield the corresponding matrix column.
+-     * That is the property which distinguishes this convention from its
+-     * transpose -- an identity test would pass either way. */
++    /* vtfm takes each output lane as the dot of a matrix column with the
++     * vector (PPSSPP's Int_Vtfm, whose ReadMatrix has this [col][row] order):
++     * the first operand transposed, like vmmul. So a basis vector picks the
++     * same lane out of every column. This property is what tells the
++     * convention from its transpose -- an identity test passes either way --
++     * and the transpose made MHFU's hunter walk mirrored from where it faced. */
+     for (int c = 0; c < 4; c++)
+         for (int r = 0; r < 4; r++) m[c][r] = (float)(c * 4 + r + 1);
+     set_matrix(0x08, 4, m);
+@@ -397,8 +400,22 @@ static void test_matrix_transform(void) {
+ 
+         psp_vtfm(0x44, 0x08, 0x40, 4);
+         psp_vfpu_regs(0x44, 4, d);
+-        for (int r = 0; r < 4; r++)
+-            CHECK_F(psp_cpu.v[d[r]], m[basis][r], "vtfm of a basis vector is that column");
++        for (int i = 0; i < 4; i++)
++            CHECK_F(psp_cpu.v[d[i]], m[i][basis], "vtfm of a basis vector is that lane of each column");
++    }
++
++    /* vhtfm4: a three-lane vector with a 1 appended, through a 4x4 matrix
++     * (side 4 in bits 4-6, vector size 3). */
++    {
++        int t[4], d[4];
++        psp_vfpu_regs(0x40, 3, t);
++        const float h[3] = { 2.0f, -1.0f, 0.5f };
++        for (int i = 0; i < 3; i++) psp_cpu.v[t[i]] = h[i];
++        psp_vtfm(0x44, 0x08, 0x40, 3 | 4 << 4);
++        psp_vfpu_regs(0x44, 4, d);
++        for (int i = 0; i < 4; i++)
++            CHECK_F(psp_cpu.v[d[i]], m[i][0] * h[0] + m[i][1] * h[1] + m[i][2] * h[2] + m[i][3],
++                    "vhtfm4 appends a 1 to the vector");
+     }
+ 
+     /* Multiplying by the identity must be a no-op, in both operand positions.
+@@ -417,9 +434,8 @@ static void test_matrix_transform(void) {
+         for (int r = 0; r < 4; r++) CHECK_F(out[c][r], m[c][r], "I * M == M");
+ 
+     /* vmmul and vtfm must agree: transforming by a product is the same as
+-     * transforming twice. This is the strongest check available without an
+-     * external oracle -- it pins the two against each other, though it still
+-     * cannot detect a consistent transpose of both. */
++     * transforming twice. Both use their first operand transposed, so with
++     * P = vmmul(E-form A, B) = AB, vtfm(P, x) = (AB)^T x = B^T (A^T x). */
+     float a[4][4], b[4][4];
+     for (int c = 0; c < 4; c++)
+         for (int r = 0; r < 4; r++) {
+@@ -446,13 +462,13 @@ static void test_matrix_transform(void) {
+     psp_vfpu_regs(0x1C, 4, d);
+     for (int i = 0; i < 4; i++) combined[i] = psp_cpu.v[d[i]];
+ 
+-    /* A * (B * x) */
+-    psp_vtfm(0x00, 0x10, 0x18, 4);        /* matrix 0 */
+-    psp_vtfm(0x04, 0x08, 0x00, 4);        /* matrix 1 */
++    /* B^T (A^T x) */
++    psp_vtfm(0x00, 0x08, 0x18, 4);        /* matrix 0 = A^T x */
++    psp_vtfm(0x04, 0x10, 0x00, 4);        /* matrix 1 = B^T (A^T x) */
+     psp_vfpu_regs(0x04, 4, d);
+     for (int i = 0; i < 4; i++)
+         CHECK_F(psp_cpu.v[d[i]], combined[i],
+-                "vmmul and vtfm agree: (A*B)x == A(Bx)");
++                "vmmul and vtfm agree: (AB)^T x == B^T (A^T x)");
+ }
+ 
+ /* The conversions. Every row is a measurement from a PSP-3000, firmware 6.61
+diff --git a/tools/allegrexrecomp/emit.c b/tools/allegrexrecomp/emit.c
+index 1806743..f4be264 100644
+--- a/tools/allegrexrecomp/emit.c
++++ b/tools/allegrexrecomp/emit.c
+@@ -549,7 +549,11 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
+     case A_VMMUL:
+         fprintf(f, "%spsp_vmmul(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
+     case A_VTFM2: case A_VTFM3: case A_VTFM4:
+-        fprintf(f, "%spsp_vtfm(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
++        /* The matrix side (2-4, from the opcode) goes in bits 4-6 next to the
++         * vector size: they differ for vhtfm. */
++        fprintf(f, "%spsp_vtfm(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt,
++                in->vsize | (unsigned)(in->op == A_VTFM2 ? 2 : in->op == A_VTFM3 ? 3 : 4) << 4);
++        return;
+     case A_VMSCL:
+         fprintf(f, "%spsp_vmscl(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
+     case A_VMIDT:
+diff --git a/src/render_gl.c b/src/render_gl.c
+new file mode 100644
+index 0000000..0c4b66d
+--- /dev/null
++++ b/src/render_gl.c
+@@ -0,0 +1,1217 @@
++/* psprecomp -- the OpenGL backend: GL 3.3 core, or GLES 3.0 for Android.
++ *
++ * The shape follows PPSSPP's GPU backends (read for reference, not copied):
++ *
++ *  - The GE interpreter keeps doing everything up to screen space (ge.c), so
++ *    this backend and the software one see the same vertices. The software
++ *    backend stays the oracle to diff against.
++ *  - A framebuffer manager: each framebuffer address the GE draws to becomes
++ *    an FBO, at `scale` times the PSP's resolution. sceDisplaySetFrameBuf
++ *    shows the FBO at the display address. A texture whose address lies in a
++ *    framebuffer samples that FBO directly (render to texture), so nothing is
++ *    read back to guest memory.
++ *  - A texture cache: decoded once through psp_tex_fetch() (the one place that
++ *    knows the PSP's formats), keyed by address, format, size and CLUT, and
++ *    re-decoded when a hash of its memory changes.
++ *  - A render thread that owns the context. The GE runs on whichever guest
++ *    thread submitted the list, and a GL context can only be current on one
++ *    thread, so the GE side records commands into a frame and the render
++ *    thread plays them back -- one frame behind, as PPSSPP's render managers
++ *    do. Recording is cheap; it is the playback that the GPU does.
++ *
++ * Not done: points and lines, stencil, colour test, logic ops, dithering,
++ * mipmaps, framebuffers read by the CPU, block transfers into framebuffers,
++ * and blend modes GL cannot express (doubled alphas, absolute difference,
++ * two different fixed colours), which are approximated.
++ */
++
++#include "psprecomp/render.h"
++#include "psprecomp/mem.h"
++#include "psprecomp/hle.h"
++
++#include "hle/host_thread.h"
++
++#include <stddef.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++/* ---- the GL subset this file uses ---------------------------------------- */
++
++typedef unsigned int GLenum, GLuint, GLbitfield;
++typedef int GLint, GLsizei;
++typedef float GLfloat;
++typedef unsigned char GLboolean;
++typedef char GLchar;
++typedef ptrdiff_t GLsizeiptr;
++
++#ifdef _WIN32
++#define GLCALL __stdcall
++#else
++#define GLCALL
++#endif
++
++#define GL_ZERO                     0
++#define GL_ONE                      1
++#define GL_TRIANGLES                0x0004
++#define GL_TRIANGLE_STRIP           0x0005
++#define GL_NEVER                    0x0200
++#define GL_LESS                     0x0201
++#define GL_EQUAL                    0x0202
++#define GL_LEQUAL                   0x0203
++#define GL_GREATER                  0x0204
++#define GL_NOTEQUAL                 0x0205
++#define GL_GEQUAL                   0x0206
++#define GL_ALWAYS                   0x0207
++#define GL_SRC_COLOR                0x0300
++#define GL_ONE_MINUS_SRC_COLOR      0x0301
++#define GL_SRC_ALPHA                0x0302
++#define GL_ONE_MINUS_SRC_ALPHA      0x0303
++#define GL_DST_ALPHA                0x0304
++#define GL_ONE_MINUS_DST_ALPHA      0x0305
++#define GL_DST_COLOR                0x0306
++#define GL_ONE_MINUS_DST_COLOR      0x0307
++#define GL_CULL_FACE                0x0B44
++#define GL_DEPTH_TEST               0x0B71
++#define GL_BLEND                    0x0BE2
++#define GL_SCISSOR_TEST             0x0C11
++#define GL_UNPACK_ALIGNMENT         0x0CF5
++#define GL_PACK_ALIGNMENT           0x0D05
++#define GL_TEXTURE_2D               0x0DE1
++#define GL_UNSIGNED_BYTE            0x1401
++#define GL_FLOAT                    0x1406
++#define GL_RGBA                     0x1908
++#define GL_NEAREST                  0x2600
++#define GL_LINEAR                   0x2601
++#define GL_TEXTURE_MAG_FILTER       0x2800
++#define GL_TEXTURE_MIN_FILTER       0x2801
++#define GL_TEXTURE_WRAP_S           0x2802
++#define GL_TEXTURE_WRAP_T           0x2803
++#define GL_REPEAT                   0x2901
++#define GL_CONSTANT_COLOR           0x8001
++#define GL_ONE_MINUS_CONSTANT_COLOR 0x8002
++#define GL_FUNC_ADD                 0x8006
++#define GL_MIN                      0x8007
++#define GL_MAX                      0x8008
++#define GL_FUNC_SUBTRACT            0x800A
++#define GL_FUNC_REVERSE_SUBTRACT    0x800B
++#define GL_RGBA8                    0x8058
++#define GL_CLAMP_TO_EDGE            0x812F
++#define GL_DEPTH_STENCIL_ATTACHMENT 0x821A
++#define GL_TEXTURE0                 0x84C0
++#define GL_DEPTH_CLAMP              0x864F
++#define GL_ARRAY_BUFFER             0x8892
++#define GL_STREAM_DRAW              0x88E0
++#define GL_DEPTH24_STENCIL8         0x88F0
++#define GL_FRAGMENT_SHADER          0x8B30
++#define GL_VERTEX_SHADER            0x8B31
++#define GL_COMPILE_STATUS           0x8B81
++#define GL_LINK_STATUS              0x8B82
++#define GL_READ_FRAMEBUFFER         0x8CA8
++#define GL_DRAW_FRAMEBUFFER         0x8CA9
++#define GL_FRAMEBUFFER_COMPLETE     0x8CD5
++#define GL_COLOR_ATTACHMENT0        0x8CE0
++#define GL_FRAMEBUFFER              0x8D40
++#define GL_RENDERBUFFER             0x8D41
++#define GL_COLOR_BUFFER_BIT         0x4000
++#define GL_DEPTH_BUFFER_BIT         0x0100
++#define GL_STENCIL_BUFFER_BIT       0x0400
++
++/* Every entry point, loaded through the host. */
++#define GL_FUNCS(X) \
++    X(void,   Enable, (GLenum)) \
++    X(void,   Disable, (GLenum)) \
++    X(GLenum, GetError, (void)) \
++    X(void,   Viewport, (GLint, GLint, GLsizei, GLsizei)) \
++    X(void,   Scissor, (GLint, GLint, GLsizei, GLsizei)) \
++    X(void,   ClearColor, (GLfloat, GLfloat, GLfloat, GLfloat)) \
++    X(void,   Clear, (GLbitfield)) \
++    X(void,   ColorMask, (GLboolean, GLboolean, GLboolean, GLboolean)) \
++    X(void,   DepthMask, (GLboolean)) \
++    X(void,   DepthFunc, (GLenum)) \
++    X(void,   BlendFuncSeparate, (GLenum, GLenum, GLenum, GLenum)) \
++    X(void,   BlendEquationSeparate, (GLenum, GLenum)) \
++    X(void,   BlendColor, (GLfloat, GLfloat, GLfloat, GLfloat)) \
++    X(void,   PixelStorei, (GLenum, GLint)) \
++    X(void,   ReadPixels, (GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void *)) \
++    X(void,   GenTextures, (GLsizei, GLuint *)) \
++    X(void,   DeleteTextures, (GLsizei, const GLuint *)) \
++    X(void,   BindTexture, (GLenum, GLuint)) \
++    X(void,   ActiveTexture, (GLenum)) \
++    X(void,   TexImage2D, (GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *)) \
++    X(void,   TexParameteri, (GLenum, GLenum, GLint)) \
++    X(void,   GenFramebuffers, (GLsizei, GLuint *)) \
++    X(void,   DeleteFramebuffers, (GLsizei, const GLuint *)) \
++    X(void,   BindFramebuffer, (GLenum, GLuint)) \
++    X(void,   FramebufferTexture2D, (GLenum, GLenum, GLenum, GLuint, GLint)) \
++    X(GLenum, CheckFramebufferStatus, (GLenum)) \
++    X(void,   BlitFramebuffer, (GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum)) \
++    X(void,   GenRenderbuffers, (GLsizei, GLuint *)) \
++    X(void,   DeleteRenderbuffers, (GLsizei, const GLuint *)) \
++    X(void,   BindRenderbuffer, (GLenum, GLuint)) \
++    X(void,   RenderbufferStorage, (GLenum, GLenum, GLsizei, GLsizei)) \
++    X(void,   FramebufferRenderbuffer, (GLenum, GLenum, GLenum, GLuint)) \
++    X(void,   GenBuffers, (GLsizei, GLuint *)) \
++    X(void,   BindBuffer, (GLenum, GLuint)) \
++    X(void,   BufferData, (GLenum, GLsizeiptr, const void *, GLenum)) \
++    X(void,   GenVertexArrays, (GLsizei, GLuint *)) \
++    X(void,   BindVertexArray, (GLuint)) \
++    X(void,   VertexAttribPointer, (GLuint, GLint, GLenum, GLboolean, GLsizei, const void *)) \
++    X(void,   EnableVertexAttribArray, (GLuint)) \
++    X(void,   DrawArrays, (GLenum, GLint, GLsizei)) \
++    X(GLuint, CreateShader, (GLenum)) \
++    X(void,   ShaderSource, (GLuint, GLsizei, const GLchar *const *, const GLint *)) \
++    X(void,   CompileShader, (GLuint)) \
++    X(void,   GetShaderiv, (GLuint, GLenum, GLint *)) \
++    X(void,   GetShaderInfoLog, (GLuint, GLsizei, GLsizei *, GLchar *)) \
++    X(GLuint, CreateProgram, (void)) \
++    X(void,   AttachShader, (GLuint, GLuint)) \
++    X(void,   LinkProgram, (GLuint)) \
++    X(void,   GetProgramiv, (GLuint, GLenum, GLint *)) \
++    X(void,   GetProgramInfoLog, (GLuint, GLsizei, GLsizei *, GLchar *)) \
++    X(void,   UseProgram, (GLuint)) \
++    X(GLint,  GetUniformLocation, (GLuint, const GLchar *)) \
++    X(void,   Uniform1i, (GLint, GLint)) \
++    X(void,   Uniform4i, (GLint, GLint, GLint, GLint, GLint)) \
++    X(void,   Uniform3f, (GLint, GLfloat, GLfloat, GLfloat))
++
++#define GL_DECLARE(ret, name, args) static ret (GLCALL *gl##name) args;
++GL_FUNCS(GL_DECLARE)
++
++/* ---- shared between the two threads ---------------------------------------- */
++
++#define SW 480
++#define SH 272
++
++static psp_gl_host g_host;
++static int         g_scale = 1;
++
++/* A growable byte buffer. */
++typedef struct { uint8_t *p; size_t n, cap; } gbuf;
++
++static void *gbuf_add(gbuf *b, size_t n) {
++    if (b->n + n > b->cap) {
++        size_t cap = b->cap ? b->cap : 1 << 16;
++        while (cap < b->n + n) cap *= 2;
++        uint8_t *p = (uint8_t *)realloc(b->p, cap);
++        if (!p) { fputs("render_gl: out of memory\n", stderr); abort(); }
++        b->p = p;
++        b->cap = cap;
++    }
++    void *at = b->p + b->n;
++    b->n += n;
++    return at;
++}
++
++/* One vertex as the GPU gets it: clip-space position (perspective comes from
++ * w), colour, normalised texture coordinate, fog factor. */
++typedef struct {
++    float    x, y, z, w;
++    uint32_t rgba;
++    float    u, v;
++    float    fog;
++} gvert;
++
++/* The GL state of one draw, resolved on the GE side to GL enums so that the
++ * render thread only applies it, and consecutive draws in the same state
++ * merge into one. Always memset before filling: draws are compared bytewise. */
++typedef struct {
++    int32_t tex_kind, tex_id;              /* 0 none, 1 cached texture, 2 framebuffer */
++    int32_t wrap_s, wrap_t, min_f, mag_f;
++    int32_t mode[4];                       /* flags, texture function, alpha func, ref | mask << 8 */
++    float   env[3], fogc[3];
++    int32_t blend, bsrc, bdst, beq;
++    float   bcol[4];
++    int32_t depth_test, depth_func, depth_mask;
++    int32_t cmask[4];
++    int32_t sc[4];                         /* scissor x, y, w, h in PSP pixels */
++} gstate;
++
++enum { MODE_TEX = 1, MODE_TEXALPHA = 2, MODE_DOUBLE = 4, MODE_FOG = 8, MODE_ATEST = 16, MODE_CLEAR = 32 };
++
++/* The command stream. Every command starts with its op and size. */
++enum { C_FB_NEW = 1, C_FB_FREE, C_FB_BIND, C_TEX_NEW, C_TEX_FREE, C_DRAW, C_PRESENT };
++
++typedef struct { uint32_t op, size; } chead;
++typedef struct { chead h; int32_t id, w, hgt; } c_fb_new;
++typedef struct { chead h; int32_t id; } c_id;
++typedef struct { chead h; int32_t id, w, hgt; uint32_t *pixels; } c_tex_new;   /* the render thread frees pixels */
++typedef struct { chead h; gstate s; uint32_t first, count; } c_draw;
++/* fb >= 0: show that framebuffer (its first 480x272); else show `pixels`. */
++typedef struct { chead h; int32_t fb; uint32_t *pixels; } c_present;
++
++typedef struct { gbuf cmd, vtx; } gframe;
++
++static gframe     g_frames[2];
++static int        g_rec;                 /* the frame being recorded (GE side) */
++static int        g_pending = -1;        /* handed to the render thread, not yet played */
++static host_mutex g_m = HOST_MUTEX_INIT;
++static host_cond  g_cv = HOST_COND_INIT;
++static int        g_started, g_init_result;
++
++/* The overlay and captures, guarded by g_m. */
++static uint32_t *g_ovl;
++static int       g_ovl_w, g_ovl_h, g_ovl_dirty;
++static int       g_want_capture;
++static uint32_t  g_capture[SW * SH];
++static int       g_have_capture;
++
++static void *cmd_add(uint32_t op, size_t size) {
++    size = (size + 7) & ~(size_t)7;
++    chead *h = (chead *)gbuf_add(&g_frames[g_rec].cmd, size);
++    memset(h, 0, size);
++    h->op = op;
++    h->size = (uint32_t)size;
++    return h;
++}
++
++/* ---- GE side: framebuffers ------------------------------------------------- */
++
++typedef struct {
++    uint32_t addr;
++    int      stride, fmt, w, h, id;
++    int      drawn;
++} gfb;
++
++#define MAX_FB 32
++static gfb      g_fbs[MAX_FB];
++static int      g_nfb, g_next_fb = 1;
++static uint32_t g_tgt_addr, g_tgt_stride;
++static int      g_tgt_fmt;
++static int      g_bound = -1;            /* the framebuffer bound in this frame's commands */
++static uint64_t g_flip;
++
++static int fb_bytes(int fmt) { return fmt == 3 ? 4 : 2; }
++
++static gfb *fb_find(uint32_t addr) {
++    for (int i = 0; i < g_nfb; i++) if (g_fbs[i].addr == addr) return &g_fbs[i];
++    return NULL;
++}
++
++/* The framebuffer the next draw lands in, created on first use. FBP, FBW and
++ * PSM arrive one at a time, so the target is only resolved at a draw. */
++static gfb *fb_target(const psp_draw_state *st) {
++    if (!g_tgt_addr || !g_tgt_stride) return NULL;
++    gfb *f = fb_find(g_tgt_addr);
++    if (f && (f->stride != (int)g_tgt_stride || f->fmt != g_tgt_fmt)) {
++        c_id *c = (c_id *)cmd_add(C_FB_FREE, sizeof *c);
++        c->id = f->id;
++        *f = g_fbs[--g_nfb];
++        f = NULL;
++        g_bound = -1;
++    }
++    if (!f) {
++        if (g_nfb == MAX_FB) {
++            c_id *c = (c_id *)cmd_add(C_FB_FREE, sizeof *c);
++            c->id = g_fbs[0].id;
++            g_fbs[0] = g_fbs[--g_nfb];
++            g_bound = -1;
++        }
++        f = &g_fbs[g_nfb++];
++        memset(f, 0, sizeof *f);
++        f->addr = g_tgt_addr;
++        f->stride = (int)g_tgt_stride;
++        f->fmt = g_tgt_fmt;
++        f->w = f->stride;
++        f->h = st->sc_y1 + 1 > SH ? st->sc_y1 + 1 : SH;
++        if (f->h > 512) f->h = 512;
++        f->id = g_next_fb++;
++        c_fb_new *c = (c_fb_new *)cmd_add(C_FB_NEW, sizeof *c);
++        c->id = f->id;
++        c->w = f->w;
++        c->hgt = f->h;
++    }
++    if (g_bound != f->id) {
++        c_id *c = (c_id *)cmd_add(C_FB_BIND, sizeof *c);
++        c->id = f->id;
++        g_bound = f->id;
++    }
++    f->drawn = 1;
++    return f;
++}
++
++/* The framebuffer that texture address `addr` lies in, and where. */
++static gfb *fb_for_texture(uint32_t addr, int *ox, int *oy) {
++    if ((addr & 0x0F000000u) != 0x04000000u) return NULL;
++    addr = 0x04000000u | (addr & 0x001FFFFFu);
++    for (int i = 0; i < g_nfb; i++) {
++        gfb *f = &g_fbs[i];
++        const uint32_t size = (uint32_t)(f->stride * f->h * fb_bytes(f->fmt));
++        if (!f->drawn || addr < f->addr || addr >= f->addr + size) continue;
++        const uint32_t px = (addr - f->addr) / (uint32_t)fb_bytes(f->fmt);
++        *ox = (int)(px % (uint32_t)f->stride);
++        *oy = (int)(px / (uint32_t)f->stride);
++        return f;
++    }
++    return NULL;
++}
++
++/* ---- GE side: the texture cache ------------------------------------------- */
++
++typedef struct {
++    uint32_t addr;
++    int      fmt, w, h, bw, swizzle;
++    uint64_t clut_key, hash;
++    uint64_t checked, used;              /* g_flip of the last hash, and of the last use */
++    int      id;
++} gtex;
++
++#define MAX_TEX 1024
++static gtex g_tex[MAX_TEX];
++static int  g_ntex, g_next_tex = 1;
++static int  g_last_tex = -1;             /* the cache entry of the previous draw */
++static uint64_t g_uploads, g_upload_bytes;
++
++static const int TEX_BITS[8] = { 16, 16, 16, 32, 4, 8, 16, 32 };
++
++static uint64_t hash_bytes(const uint8_t *p, size_t n) {
++    /* Four independent lanes, so the multiplies overlap. */
++    uint64_t h[4] = { 0x9E3779B97F4A7C15ull, 0xC2B2AE3D27D4EB4Full, 0x165667B19E3779F9ull, 0x27D4EB2F165667C5ull };
++    size_t i = 0;
++    for (; i + 32 <= n; i += 32)
++        for (int k = 0; k < 4; k++) {
++            uint64_t w;
++            memcpy(&w, p + i + k * 8, 8);
++            h[k] = (h[k] ^ w) * 0x100000001B3ull;
++            h[k] ^= h[k] >> 29;
++        }
++    uint64_t r = h[0] ^ (h[1] << 1) ^ (h[2] << 2) ^ (h[3] << 3) ^ n;
++    for (; i < n; i++) r = (r ^ p[i]) * 0x100000001B3ull;
++    return r;
++}
++
++/* Bytes a texture covers in memory, from its address. */
++static uint32_t tex_span(const psp_draw_state *st) {
++    uint32_t rowb = (uint32_t)st->tex_bw * (uint32_t)TEX_BITS[st->tex_fmt] / 8;
++    uint32_t rows = (uint32_t)st->tex_h;
++    if (st->tex_swizzle) { rowb = (rowb + 15) & ~15u; rows = (rows + 7) & ~7u; }
++    return rowb * rows;
++}
++
++static uint64_t clut_key(const psp_draw_state *st) {
++    if (st->tex_fmt < PSP_TPSM_T4 || !st->clut) return 0;
++    const uint64_t params = (uint64_t)st->clut_fmt | (uint64_t)st->clut_shift << 2 |
++                            (uint64_t)st->clut_mask << 8 | (uint64_t)st->clut_start << 16;
++    return hash_bytes(st->clut, 1024) ^ (params * 0x9E3779B97F4A7C15ull);
++}
++
++static void tex_upload(gtex *t, const psp_draw_state *st) {
++    uint32_t *px = (uint32_t *)malloc((size_t)st->tex_w * (size_t)st->tex_h * 4);
++    if (!px) return;
++    for (int y = 0; y < st->tex_h; y++)
++        for (int x = 0; x < st->tex_w; x++)
++            px[y * st->tex_w + x] = psp_tex_fetch(st, x, y);
++    c_tex_new *c = (c_tex_new *)cmd_add(C_TEX_NEW, sizeof *c);
++    c->id = t->id;
++    c->w = st->tex_w;
++    c->hgt = st->tex_h;
++    c->pixels = px;
++    g_uploads++;
++    g_upload_bytes += (uint64_t)st->tex_w * (uint64_t)st->tex_h * 4;
++}
++
++/* The cached texture for the current state: found, checked against memory
++ * once per frame (or when it is bound anew and small), re-decoded when the
++ * memory changed. Returns its id, or 0 for "no texture". */
++static int tex_lookup(const psp_draw_state *st) {
++    if (st->tex_fmt > PSP_TPSM_T32 || st->tex_w <= 0 || st->tex_h <= 0 || st->tex_bw <= 0) return 0;
++    const uint64_t ck = clut_key(st);
++    gtex *t = NULL;
++    int idx = -1;
++    for (int i = 0; i < g_ntex; i++) {
++        gtex *e = &g_tex[i];
++        if (e->addr == st->tex_addr && e->fmt == st->tex_fmt && e->w == st->tex_w && e->h == st->tex_h &&
++            e->bw == st->tex_bw && e->swizzle == st->tex_swizzle && e->clut_key == ck) {
++            t = e; idx = i; break;
++        }
++    }
++    const uint32_t span = tex_span(st);
++    const uint8_t *mem = (const uint8_t *)psp_mem_ptr(st->tex_addr, span);
++    if (!t) {
++        if (g_ntex == MAX_TEX) {
++            /* Full: drop the least recently used. */
++            int old = 0;
++            for (int i = 1; i < g_ntex; i++) if (g_tex[i].used < g_tex[old].used) old = i;
++            c_id *c = (c_id *)cmd_add(C_TEX_FREE, sizeof *c);
++            c->id = g_tex[old].id;
++            g_tex[old] = g_tex[--g_ntex];
++            if (g_last_tex == g_ntex) g_last_tex = old;
++        }
++        idx = g_ntex++;
++        t = &g_tex[idx];
++        memset(t, 0, sizeof *t);
++        t->addr = st->tex_addr; t->fmt = st->tex_fmt; t->w = st->tex_w; t->h = st->tex_h;
++        t->bw = st->tex_bw; t->swizzle = st->tex_swizzle; t->clut_key = ck;
++        t->id = g_next_tex++;
++        t->hash = mem ? hash_bytes(mem, span) : 0;
++        t->checked = g_flip;
++        tex_upload(t, st);
++    } else if (t->checked != g_flip || (idx != g_last_tex && span <= 32768)) {
++        const uint64_t h = mem ? hash_bytes(mem, span) : t->hash;
++        t->checked = g_flip;
++        if (h != t->hash) { t->hash = h; tex_upload(t, st); }
++    }
++    t->used = g_flip;
++    g_last_tex = idx;
++    return t->id;
++}
++
++/* Textures nobody drew with for a while go. */
++static void tex_evict(void) {
++    for (int i = 0; i < g_ntex; ) {
++        if (g_flip - g_tex[i].used > 600) {
++            c_id *c = (c_id *)cmd_add(C_TEX_FREE, sizeof *c);
++            c->id = g_tex[i].id;
++            g_tex[i] = g_tex[--g_ntex];
++            g_last_tex = -1;
++        } else {
++            i++;
++        }
++    }
++}
++
++/* ---- GE side: state ------------------------------------------------------ */
++
++static const GLenum DEPTH_FUNC[8] = { GL_NEVER, GL_ALWAYS, GL_EQUAL, GL_NOTEQUAL,
++                                      GL_LESS, GL_LEQUAL, GL_GREATER, GL_GEQUAL };
++
++/* A PSP blend factor as a GL one. Codes 0 and 1 name the other colour; 6-9
++ * are doubled alphas, which GL has no factor for (approximated undoubled);
++ * 10 and up is the fixed colour, for which GL has one constant to share. */
++static GLenum blend_factor(int code, int is_src, uint32_t fix, gstate *s, int *const_used) {
++    switch (code) {
++    case 0:  return is_src ? GL_DST_COLOR : GL_SRC_COLOR;
++    case 1:  return is_src ? GL_ONE_MINUS_DST_COLOR : GL_ONE_MINUS_SRC_COLOR;
++    case 2: case 6: return GL_SRC_ALPHA;
++    case 3: case 7: return GL_ONE_MINUS_SRC_ALPHA;
++    case 4: case 8: return GL_DST_ALPHA;
++    case 5: case 9: return GL_ONE_MINUS_DST_ALPHA;
++    default: break;
++    }
++    fix &= 0xFFFFFFu;
++    if (fix == 0xFFFFFFu) return GL_ONE;
++    if (fix == 0) return GL_ZERO;
++    const float r = (float)(fix & 0xFF) / 255.0f, g = (float)((fix >> 8) & 0xFF) / 255.0f,
++                b = (float)((fix >> 16) & 0xFF) / 255.0f;
++    if (*const_used) {
++        if (s->bcol[0] == r && s->bcol[1] == g && s->bcol[2] == b) return GL_CONSTANT_COLOR;
++        if (s->bcol[0] == 1.0f - r && s->bcol[1] == 1.0f - g && s->bcol[2] == 1.0f - b)
++            return GL_ONE_MINUS_CONSTANT_COLOR;
++        return GL_CONSTANT_COLOR;           /* two different fixed colours: approximate */
++    }
++    *const_used = 1;
++    s->bcol[0] = r; s->bcol[1] = g; s->bcol[2] = b; s->bcol[3] = 1.0f;
++    return GL_CONSTANT_COLOR;
++}
++
++static void rgb_of(uint32_t c, float out[3]) {
++    out[0] = (float)(c & 0xFF) / 255.0f;
++    out[1] = (float)((c >> 8) & 0xFF) / 255.0f;
++    out[2] = (float)((c >> 16) & 0xFF) / 255.0f;
++}
++
++/* ---- GE side: the backend ------------------------------------------------ */
++
++static uint64_t g_draws, g_batches;
++static size_t   g_last_draw = (size_t)-1;   /* offset of this frame's last C_DRAW */
++
++static void gl_target(uint32_t addr, uint32_t stride, int fmt) {
++    g_tgt_addr = addr;
++    g_tgt_stride = stride;
++    g_tgt_fmt = fmt;
++}
++
++static void put_vertex(gframe *f, const psp_vertex *v, uint32_t rgba, const gfb *fb,
++                       float us, float vs, float uo, float vo) {
++    gvert *o = (gvert *)gbuf_add(&f->vtx, sizeof *o);
++    const float W = v->w > 0.0f ? 1.0f / v->w : 1.0f;
++    o->x = (v->fx / (float)fb->w * 2.0f - 1.0f) * W;
++    o->y = (v->fy / (float)fb->h * 2.0f - 1.0f) * W;
++    o->z = (v->z / 65535.0f * 2.0f - 1.0f) * W;
++    o->w = W;
++    o->rgba = rgba;
++    o->u = (v->u + uo) * us;
++    o->v = (v->v + vo) * vs;
++    o->fog = v->fog;
++}
++
++static void gl_draw(int prim, const psp_vertex *v, int count, const psp_draw_state *st) {
++    if (prim != PSP_PRIM_SPRITES && (prim < PSP_PRIM_TRIANGLES || prim > PSP_PRIM_TRIANGLE_FAN)) return;
++    if (!g_started) return;
++    gfb *fb = fb_target(st);
++    if (!fb) return;
++    g_draws++;
++
++    gstate s;
++    memset(&s, 0, sizeof s);
++    s.sc[0] = st->sc_x0;
++    s.sc[1] = st->sc_y0;
++    s.sc[2] = st->sc_x1 - st->sc_x0 + 1;
++    s.sc[3] = st->sc_y1 - st->sc_y0 + 1;
++    if (s.sc[2] <= 0 || s.sc[3] <= 0) return;
++
++    float us = 0, vs = 0, uo = 0, vo = 0;
++    if (st->clear) {
++        s.mode[0] = MODE_CLEAR;
++        s.cmask[0] = s.cmask[1] = s.cmask[2] = st->clear_color;
++        s.cmask[3] = st->clear_alpha;
++        if (st->clear_depth) { s.depth_test = 1; s.depth_func = GL_ALWAYS; s.depth_mask = 1; }
++    } else {
++        s.cmask[0] = s.cmask[1] = s.cmask[2] = s.cmask[3] = 1;
++        if (st->tex_enable) {
++            int ox, oy;
++            gfb *src = st->tex_fmt <= PSP_TPSM_8888 ? fb_for_texture(st->tex_addr, &ox, &oy) : NULL;
++            if (src) {
++                s.tex_kind = 2;
++                s.tex_id = src->id;
++                us = 1.0f / (float)src->w; vs = 1.0f / (float)src->h;
++                uo = (float)ox; vo = (float)oy;
++                s.wrap_s = s.wrap_t = GL_CLAMP_TO_EDGE;
++            } else if ((s.tex_id = tex_lookup(st)) != 0) {
++                s.tex_kind = 1;
++                us = 1.0f / (float)st->tex_w; vs = 1.0f / (float)st->tex_h;
++                s.wrap_s = st->tex_clamp_u ? GL_CLAMP_TO_EDGE : GL_REPEAT;
++                s.wrap_t = st->tex_clamp_v ? GL_CLAMP_TO_EDGE : GL_REPEAT;
++            }
++            if (s.tex_kind) {
++                s.mode[0] |= MODE_TEX | (st->tex_alpha ? MODE_TEXALPHA : 0) | (st->tex_double ? MODE_DOUBLE : 0);
++                s.mode[1] = st->tex_func;
++                s.min_f = st->tex_min_linear ? GL_LINEAR : GL_NEAREST;
++                s.mag_f = st->tex_mag_linear ? GL_LINEAR : GL_NEAREST;
++                rgb_of(st->tex_env, s.env);
++            }
++        }
++        if (st->fog) { s.mode[0] |= MODE_FOG; rgb_of(st->fog_color, s.fogc); }
++        if (st->atest) {
++            s.mode[0] |= MODE_ATEST;
++            s.mode[2] = st->atest_func;
++            s.mode[3] = (st->atest_ref & 0xFF) | (st->atest_mask & 0xFF) << 8;
++        }
++        if (st->ztest && st->zb_stride) {
++            s.depth_test = 1;
++            s.depth_func = (int32_t)DEPTH_FUNC[st->ztest_func & 7];
++            s.depth_mask = st->zwrite;
++        }
++        if (st->blend) {
++            int const_used = 0;
++            s.blend = 1;
++            s.bsrc = (int32_t)blend_factor(st->blend_src, 1, st->blend_sfix, &s, &const_used);
++            s.bdst = (int32_t)blend_factor(st->blend_dst, 0, st->blend_dfix, &s, &const_used);
++            static const GLenum EQ[6] = { GL_FUNC_ADD, GL_FUNC_SUBTRACT, GL_FUNC_REVERSE_SUBTRACT,
++                                          GL_MIN, GL_MAX, GL_FUNC_ADD };
++            s.beq = (int32_t)EQ[st->blend_op < 6 ? st->blend_op : 0];
++        }
++    }
++
++    /* Everything becomes a triangle list. Flat shading takes each triangle's
++     * last vertex colour, as ge.c's clipper also keeps it last. */
++    gframe *f = &g_frames[g_rec];
++    const uint32_t first = (uint32_t)(f->vtx.n / sizeof(gvert));
++    const int flat = !st->gouraud && !st->clear;
++#define TRI(a, b, c) do { \
++        const uint32_t pc = (c)->rgba; \
++        put_vertex(f, (a), flat ? pc : (a)->rgba, fb, us, vs, uo, vo); \
++        put_vertex(f, (b), flat ? pc : (b)->rgba, fb, us, vs, uo, vo); \
++        put_vertex(f, (c), pc, fb, us, vs, uo, vo); \
++    } while (0)
++    switch (prim) {
++    case PSP_PRIM_TRIANGLES:
++        for (int i = 0; i + 2 < count; i += 3) TRI(&v[i], &v[i + 1], &v[i + 2]);
++        break;
++    case PSP_PRIM_TRIANGLE_STRIP:
++        for (int i = 0; i + 2 < count; i++) TRI(&v[i], &v[i + 1], &v[i + 2]);
++        break;
++    case PSP_PRIM_TRIANGLE_FAN:
++        for (int i = 1; i + 1 < count; i++) TRI(&v[0], &v[i], &v[i + 1]);
++        break;
++    default:
++        /* A sprite: two corners of a rectangle, coloured, deep and fogged by
++         * the second; texture coordinates run corner to corner. */
++        for (int i = 0; i + 1 < count; i += 2) {
++            const psp_vertex *a = &v[i], *b = &v[i + 1];
++            psp_vertex c[4];
++            for (int k = 0; k < 4; k++) {
++                c[k] = *b;
++                c[k].w = 0;
++            }
++            c[0].fx = a->fx; c[0].fy = a->fy; c[0].u = a->u; c[0].v = a->v;
++            c[1].fx = b->fx; c[1].fy = a->fy; c[1].u = b->u; c[1].v = a->v;
++            c[2].fx = a->fx; c[2].fy = b->fy; c[2].u = a->u; c[2].v = b->v;
++            c[3].fx = b->fx; c[3].fy = b->fy; c[3].u = b->u; c[3].v = b->v;
++            TRI(&c[0], &c[1], &c[2]);
++            TRI(&c[1], &c[3], &c[2]);
++        }
++        break;
++    }
++#undef TRI
++    const uint32_t n = (uint32_t)(f->vtx.n / sizeof(gvert)) - first;
++    if (!n) return;
++
++    /* Same state, right after the previous draw with nothing in between: one
++     * batch. */
++    if (g_last_draw != (size_t)-1 && g_last_draw + ((sizeof(c_draw) + 7) & ~(size_t)7) == f->cmd.n) {
++        c_draw *d = (c_draw *)(f->cmd.p + g_last_draw);
++        if (d->first + d->count == first && !memcmp(&d->s, &s, sizeof s)) { d->count += n; return; }
++    }
++    g_last_draw = f->cmd.n;
++    c_draw *d = (c_draw *)cmd_add(C_DRAW, sizeof *d);
++    d->s = s;
++    d->first = first;
++    d->count = n;
++    g_batches++;
++}
++
++/* sceDisplaySetFrameBuf: hand the recorded frame to the render thread, with
++ * what to show -- the FBO at the display address, or (for a framebuffer the
++ * GE never drew, like a CPU-drawn one) guest memory. */
++static void gl_present(void) {
++    if (!g_started) return;
++    uint32_t addr, stride, fmt;
++    psp_display_get(&addr, &stride, &fmt);
++    addr = 0x04000000u | (addr & 0x001FFFFFu);
++    c_present *c = (c_present *)cmd_add(C_PRESENT, sizeof *c);
++    gfb *f = fb_find(addr);
++    if (f && f->drawn) {
++        c->fb = f->id;
++    } else {
++        c->fb = -1;
++        const uint32_t bpp = fmt == 3 ? 4 : 2;
++        const uint8_t *src = (const uint8_t *)psp_mem_ptr(addr, stride * SH * bpp);
++        uint32_t *px = src && stride ? (uint32_t *)malloc(SW * SH * 4) : NULL;
++        if (px)
++            for (int y = 0; y < SH; y++)
++                for (int x = 0; x < SW; x++) {
++                    const uint8_t *p = src + ((size_t)y * stride + (size_t)x) * bpp;
++                    const uint32_t raw = bpp == 4 ? (uint32_t)p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24
++                                                  : (uint32_t)(p[0] | p[1] << 8);
++                    px[y * SW + x] = psp_color_expand(raw, (int)fmt) | 0xFF000000u;
++                }
++        c->pixels = px;
++    }
++
++    g_flip++;
++    if ((g_flip & 63) == 0) tex_evict();
++
++    host_mutex_lock(&g_m);
++    while (g_pending >= 0) host_cond_wait(&g_cv, &g_m);
++    g_pending = g_rec;
++    host_cond_broadcast(&g_cv);
++    host_mutex_unlock(&g_m);
++
++    g_rec ^= 1;
++    g_frames[g_rec].cmd.n = 0;
++    g_frames[g_rec].vtx.n = 0;
++    g_bound = -1;
++    g_last_tex = -1;
++    g_last_draw = (size_t)-1;
++}
++
++static int gl_capture(uint32_t *rgba) {
++    host_mutex_lock(&g_m);
++    g_want_capture = 1;
++    const int have = g_have_capture;
++    if (have) memcpy(rgba, g_capture, sizeof g_capture);
++    host_mutex_unlock(&g_m);
++    return have ? 0 : -1;
++}
++
++void psp_render_gl_overlay(const uint32_t *rgba, int w, int h) {
++    host_mutex_lock(&g_m);
++    free(g_ovl);
++    g_ovl = NULL;
++    g_ovl_w = g_ovl_h = 0;
++    if (rgba && w > 0 && h > 0 && (g_ovl = (uint32_t *)malloc((size_t)w * (size_t)h * 4)) != NULL) {
++        memcpy(g_ovl, rgba, (size_t)w * (size_t)h * 4);
++        g_ovl_w = w;
++        g_ovl_h = h;
++    }
++    g_ovl_dirty = 1;
++    host_mutex_unlock(&g_m);
++}
++
++static int  gl_init(int w, int h) { (void)w; (void)h; return g_started ? 0 : -1; }
++static void gl_noop(void) { }
++
++const psp_render_backend psp_render_gl = {
++    "gl", gl_init, gl_noop, gl_target, gl_draw, gl_noop, gl_present, gl_capture
++};
++
++/* ---- render thread ------------------------------------------------------- */
++
++static const char *VS_DRAW =
++    "layout(location = 0) in vec4 a_pos;\n"
++    "layout(location = 1) in vec4 a_col;\n"
++    "layout(location = 2) in vec2 a_uv;\n"
++    "layout(location = 3) in float a_fog;\n"
++    "out vec4 v_col;\n"
++    "out vec2 v_uv;\n"
++    "out float v_fog;\n"
++    "void main() { gl_Position = a_pos; v_col = a_col; v_uv = a_uv; v_fog = a_fog; }\n";
++
++/* The pixel pipeline of render.c's fragment(), in the same order. */
++static const char *FS_DRAW =
++    "uniform sampler2D u_tex;\n"
++    "uniform ivec4 u_mode;\n"
++    "uniform vec3 u_env;\n"
++    "uniform vec3 u_fog;\n"
++    "in vec4 v_col;\n"
++    "in vec2 v_uv;\n"
++    "in float v_fog;\n"
++    "out vec4 o_col;\n"
++    "void main() {\n"
++    "    vec4 c = v_col;\n"
++    "    int f = u_mode.x;\n"
++    "    if ((f & 32) != 0) { o_col = c; return; }\n"
++    "    if ((f & 1) != 0) {\n"
++    "        vec4 t = texture(u_tex, v_uv);\n"
++    "        bool ta = (f & 2) != 0;\n"
++    "        int fn = u_mode.y;\n"
++    "        vec3 rgb;\n"
++    "        float a = c.a;\n"
++    "        if (fn == 0)      { rgb = t.rgb * c.rgb; if (ta) a = t.a * c.a; }\n"
++    "        else if (fn == 1) { rgb = ta ? mix(c.rgb, t.rgb, t.a) : t.rgb; }\n"
++    "        else if (fn == 2) { rgb = mix(c.rgb, u_env, t.rgb); if (ta) a = t.a * c.a; }\n"
++    "        else if (fn == 3) { rgb = t.rgb; if (ta) a = t.a; }\n"
++    "        else              { rgb = t.rgb + c.rgb; if (ta) a = t.a * c.a; }\n"
++    "        if ((f & 4) != 0) rgb *= 2.0;\n"
++    "        c = vec4(clamp(rgb, 0.0, 1.0), a);\n"
++    "    }\n"
++    "    if ((f & 8) != 0) c.rgb = mix(u_fog, c.rgb, clamp(v_fog, 0.0, 1.0));\n"
++    "    if ((f & 16) != 0) {\n"
++    "        int m = (u_mode.w >> 8) & 255;\n"
++    "        int a = int(c.a * 255.0 + 0.5) & m;\n"
++    "        int r = u_mode.w & m;\n"
++    "        int fn = u_mode.z;\n"
++    "        bool pass = fn == 1 || (fn == 2 && a == r) || (fn == 3 && a != r) || (fn == 4 && a < r) ||\n"
++    "                    (fn == 5 && a <= r) || (fn == 6 && a > r) || (fn == 7 && a >= r);\n"
++    "        if (!pass) discard;\n"
++    "    }\n"
++    "    o_col = c;\n"
++    "}\n";
++
++static const char *VS_BLIT =
++    "layout(location = 0) in vec4 a_pos;\n"
++    "layout(location = 2) in vec2 a_uv;\n"
++    "out vec2 v_uv;\n"
++    "void main() { gl_Position = a_pos; v_uv = a_uv; }\n";
++
++static const char *FS_BLIT =
++    "uniform sampler2D u_tex;\n"
++    "uniform ivec4 u_mode;\n"
++    "in vec2 v_uv;\n"
++    "out vec4 o_col;\n"
++    "void main() { vec4 t = texture(u_tex, v_uv); o_col = u_mode.x != 0 ? t : vec4(t.rgb, 1.0); }\n";
++
++typedef struct { GLuint fbo, tex, depth; int w, h; } rfb;   /* w, h in real pixels */
++
++static GLuint *g_rtex;        /* texture id -> GL name */
++static int     g_nrtex;
++static rfb    *g_rfb;         /* framebuffer id -> objects */
++static int     g_nrfb;
++static GLuint  g_prog, g_blit, g_vao, g_vbo, g_bvao, g_bvbo, g_show_tex, g_ovl_tex, g_cap_fbo, g_cap_tex;
++static GLint   g_u_mode, g_u_env, g_u_fog, g_b_mode;
++static int     g_cur_fb_h;
++
++static void *grow(void *p, int *n, int need, size_t one) {
++    if (need < *n) return p;
++    int m = *n ? *n : 64;
++    while (m <= need) m *= 2;
++    p = realloc(p, (size_t)m * one);
++    if (!p) { fputs("render_gl: out of memory\n", stderr); abort(); }
++    memset((uint8_t *)p + (size_t)*n * one, 0, (size_t)(m - *n) * one);
++    *n = m;
++    return p;
++}
++
++static GLuint compile(GLenum type, const char *body) {
++    const char *head = g_host.gles ? "#version 300 es\nprecision highp float;\nprecision highp int;\n"
++                                   : "#version 330 core\n";
++    const char *src[2] = { head, body };
++    GLuint s = glCreateShader(type);
++    glShaderSource(s, 2, src, NULL);
++    glCompileShader(s);
++    GLint ok = 0;
++    glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
++    if (!ok) {
++        char log[1024];
++        glGetShaderInfoLog(s, sizeof log, NULL, log);
++        fprintf(stderr, "render_gl: shader: %s\n", log);
++        return 0;
++    }
++    return s;
++}
++
++static GLuint program(const char *vs, const char *fs) {
++    GLuint v = compile(GL_VERTEX_SHADER, vs), f = compile(GL_FRAGMENT_SHADER, fs);
++    if (!v || !f) return 0;
++    GLuint p = glCreateProgram();
++    glAttachShader(p, v);
++    glAttachShader(p, f);
++    glLinkProgram(p);
++    GLint ok = 0;
++    glGetProgramiv(p, GL_LINK_STATUS, &ok);
++    if (!ok) {
++        char log[1024];
++        glGetProgramInfoLog(p, sizeof log, NULL, log);
++        fprintf(stderr, "render_gl: link: %s\n", log);
++        return 0;
++    }
++    return p;
++}
++
++static void vertex_layout(void) {
++    glVertexAttribPointer(0, 4, GL_FLOAT, 0, sizeof(gvert), (const void *)offsetof(gvert, x));
++    glVertexAttribPointer(1, 4, GL_UNSIGNED_BYTE, 1, sizeof(gvert), (const void *)offsetof(gvert, rgba));
++    glVertexAttribPointer(2, 2, GL_FLOAT, 0, sizeof(gvert), (const void *)offsetof(gvert, u));
++    glVertexAttribPointer(3, 1, GL_FLOAT, 0, sizeof(gvert), (const void *)offsetof(gvert, fog));
++    for (GLuint i = 0; i < 4; i++) glEnableVertexAttribArray(i);
++}
++
++static GLuint new_texture(int w, int h, const void *px, GLenum filter) {
++    GLuint t;
++    glGenTextures(1, &t);
++    glBindTexture(GL_TEXTURE_2D, t);
++    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, (GLint)filter);
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (GLint)filter);
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
++    return t;
++}
++
++static int load_gl(void) {
++    int missing = 0;
++#define GL_LOAD(ret, name, args) \
++    gl##name = (ret (GLCALL *) args)g_host.get_proc(g_host.user, "gl" #name); \
++    if (!gl##name) { fprintf(stderr, "render_gl: no gl%s\n", #name); missing++; }
++    GL_FUNCS(GL_LOAD)
++#undef GL_LOAD
++    return missing ? -1 : 0;
++}
++
++static int setup(void) {
++    if (g_host.init(g_host.user) != 0) return -1;
++    if (load_gl() != 0) return -1;
++    g_prog = program(VS_DRAW, FS_DRAW);
++    g_blit = program(VS_BLIT, FS_BLIT);
++    if (!g_prog || !g_blit) return -1;
++    glUseProgram(g_prog);
++    glUniform1i(glGetUniformLocation(g_prog, "u_tex"), 0);
++    g_u_mode = glGetUniformLocation(g_prog, "u_mode");
++    g_u_env = glGetUniformLocation(g_prog, "u_env");
++    g_u_fog = glGetUniformLocation(g_prog, "u_fog");
++    glUseProgram(g_blit);
++    glUniform1i(glGetUniformLocation(g_blit, "u_tex"), 0);
++    g_b_mode = glGetUniformLocation(g_blit, "u_mode");
++
++    glGenVertexArrays(1, &g_vao);
++    glGenBuffers(1, &g_vbo);
++    glBindVertexArray(g_vao);
++    glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
++    vertex_layout();
++    glGenVertexArrays(1, &g_bvao);
++    glGenBuffers(1, &g_bvbo);
++    glBindVertexArray(g_bvao);
++    glBindBuffer(GL_ARRAY_BUFFER, g_bvbo);
++    vertex_layout();
++
++    glDisable(GL_CULL_FACE);
++    if (!g_host.gles) glEnable(GL_DEPTH_CLAMP);   /* the PSP clamps depth rather than clipping it */
++    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
++    glPixelStorei(GL_PACK_ALIGNMENT, 1);
++    glActiveTexture(GL_TEXTURE0);
++    return glGetError() == 0 ? 0 : -1;
++}
++
++/* The state of the last draw, so only what changed is set. */
++static gstate g_applied;
++static int    g_applied_valid;
++
++static void bind_texture(const gstate *s) {
++    GLuint t = 0;
++    if (s->tex_kind == 1 && s->tex_id < g_nrtex) t = g_rtex[s->tex_id];
++    if (s->tex_kind == 2 && s->tex_id < g_nrfb) t = g_rfb[s->tex_id].tex;
++    glBindTexture(GL_TEXTURE_2D, t);
++    if (!t) return;
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, s->wrap_s);
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, s->wrap_t);
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, s->min_f);
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, s->mag_f);
++}
++
++static void apply(const gstate *s) {
++    const gstate *o = g_applied_valid ? &g_applied : NULL;
++    if (!o || o->tex_kind != s->tex_kind || o->tex_id != s->tex_id || o->wrap_s != s->wrap_s ||
++        o->wrap_t != s->wrap_t || o->min_f != s->min_f || o->mag_f != s->mag_f)
++        bind_texture(s);
++    if (!o || memcmp(o->mode, s->mode, sizeof s->mode)) glUniform4i(g_u_mode, s->mode[0], s->mode[1], s->mode[2], s->mode[3]);
++    if (!o || memcmp(o->env, s->env, sizeof s->env)) glUniform3f(g_u_env, s->env[0], s->env[1], s->env[2]);
++    if (!o || memcmp(o->fogc, s->fogc, sizeof s->fogc)) glUniform3f(g_u_fog, s->fogc[0], s->fogc[1], s->fogc[2]);
++    if (!o || o->blend != s->blend) { if (s->blend) glEnable(GL_BLEND); else glDisable(GL_BLEND); }
++    if (s->blend) {
++        if (!o || o->bsrc != s->bsrc || o->bdst != s->bdst || !o->blend)
++            glBlendFuncSeparate((GLenum)s->bsrc, (GLenum)s->bdst, GL_ONE, GL_ZERO);   /* alpha: the source's */
++        if (!o || o->beq != s->beq || !o->blend) glBlendEquationSeparate((GLenum)s->beq, GL_FUNC_ADD);
++        if (!o || memcmp(o->bcol, s->bcol, sizeof s->bcol) || !o->blend)
++            glBlendColor(s->bcol[0], s->bcol[1], s->bcol[2], s->bcol[3]);
++    }
++    if (!o || o->depth_test != s->depth_test) { if (s->depth_test) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST); }
++    if (s->depth_test && (!o || o->depth_func != s->depth_func || !o->depth_test)) glDepthFunc((GLenum)s->depth_func);
++    if (!o || o->depth_mask != s->depth_mask) glDepthMask((GLboolean)s->depth_mask);
++    if (!o || memcmp(o->cmask, s->cmask, sizeof s->cmask))
++        glColorMask((GLboolean)s->cmask[0], (GLboolean)s->cmask[1], (GLboolean)s->cmask[2], (GLboolean)s->cmask[3]);
++    if (!o || memcmp(o->sc, s->sc, sizeof s->sc))
++        glScissor(s->sc[0] * g_scale, s->sc[1] * g_scale, s->sc[2] * g_scale, s->sc[3] * g_scale);
++    g_applied = *s;
++    g_applied_valid = 1;
++}
++
++static void fb_new(int id, int w, int h) {
++    g_rfb = (rfb *)grow(g_rfb, &g_nrfb, id, sizeof *g_rfb);
++    rfb *f = &g_rfb[id];
++    f->w = w * g_scale;
++    f->h = h * g_scale;
++    f->tex = new_texture(f->w, f->h, NULL, GL_LINEAR);
++    glGenRenderbuffers(1, &f->depth);
++    glBindRenderbuffer(GL_RENDERBUFFER, f->depth);
++    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, f->w, f->h);
++    glGenFramebuffers(1, &f->fbo);
++    glBindFramebuffer(GL_FRAMEBUFFER, f->fbo);
++    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, f->tex, 0);
++    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, f->depth);
++    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
++        fprintf(stderr, "render_gl: framebuffer %d (%dx%d) incomplete\n", id, w, h);
++    glDisable(GL_SCISSOR_TEST);
++    glColorMask(1, 1, 1, 1);
++    glDepthMask(1);
++    glClearColor(0, 0, 0, 0);
++    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
++    glEnable(GL_SCISSOR_TEST);
++    g_applied_valid = 0;
++    g_cur_fb_h = 0;
++}
++
++static void fb_free(int id) {
++    if (id >= g_nrfb || !g_rfb[id].fbo) return;
++    rfb *f = &g_rfb[id];
++    glDeleteFramebuffers(1, &f->fbo);
++    glDeleteTextures(1, &f->tex);
++    glDeleteRenderbuffers(1, &f->depth);
++    memset(f, 0, sizeof *f);
++}
++
++static void fb_bind(int id) {
++    if (id >= g_nrfb || !g_rfb[id].fbo) return;
++    glBindFramebuffer(GL_FRAMEBUFFER, g_rfb[id].fbo);
++    glViewport(0, 0, g_rfb[id].w, g_rfb[id].h);
++    glEnable(GL_SCISSOR_TEST);
++    g_cur_fb_h = g_rfb[id].h;
++}
++
++/* A textured rectangle in window pixels (y down), for presenting. */
++static void blit_quad(float x0, float y0, float x1, float y1, int ww, int wh,
++                      float u0, float v0, float u1, float v1) {
++    gvert q[4];
++    memset(q, 0, sizeof q);
++    const float X0 = x0 / (float)ww * 2 - 1, X1 = x1 / (float)ww * 2 - 1;
++    const float Y0 = 1 - y0 / (float)wh * 2, Y1 = 1 - y1 / (float)wh * 2;
++    q[0].x = X0; q[0].y = Y0; q[0].u = u0; q[0].v = v0;
++    q[1].x = X1; q[1].y = Y0; q[1].u = u1; q[1].v = v0;
++    q[2].x = X0; q[2].y = Y1; q[2].u = u0; q[2].v = v1;
++    q[3].x = X1; q[3].y = Y1; q[3].u = u1; q[3].v = v1;
++    for (int i = 0; i < 4; i++) q[i].w = 1;
++    glBindVertexArray(g_bvao);
++    glBindBuffer(GL_ARRAY_BUFFER, g_bvbo);
++    glBufferData(GL_ARRAY_BUFFER, sizeof q, q, GL_STREAM_DRAW);
++    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
++}
++
++/* Keep a 480x272 copy of what was shown, for psp_display_capture(). */
++static void capture(GLuint src_fbo, int sw, int sh, const uint32_t *pixels) {
++    host_mutex_lock(&g_m);
++    const int want = g_want_capture;
++    host_mutex_unlock(&g_m);
++    if (!want) return;
++    static uint32_t buf[SW * SH];
++    if (pixels) {
++        memcpy(buf, pixels, sizeof buf);
++    } else {
++        if (!g_cap_fbo) {
++            g_cap_tex = new_texture(SW, SH, NULL, GL_NEAREST);
++            glGenFramebuffers(1, &g_cap_fbo);
++            glBindFramebuffer(GL_FRAMEBUFFER, g_cap_fbo);
++            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_cap_tex, 0);
++        }
++        glBindFramebuffer(GL_READ_FRAMEBUFFER, src_fbo);
++        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_cap_fbo);
++        glBlitFramebuffer(0, 0, sw, sh, 0, 0, SW, SH, GL_COLOR_BUFFER_BIT, GL_LINEAR);
++        glBindFramebuffer(GL_FRAMEBUFFER, g_cap_fbo);
++        glReadPixels(0, 0, SW, SH, GL_RGBA, GL_UNSIGNED_BYTE, buf);
++        glBindFramebuffer(GL_FRAMEBUFFER, 0);
++    }
++    host_mutex_lock(&g_m);
++    memcpy(g_capture, buf, sizeof buf);
++    g_have_capture = 1;
++    host_mutex_unlock(&g_m);
++}
++
++static void present(const c_present *c) {
++    int ww = 0, wh = 0;
++    g_host.size(g_host.user, &ww, &wh);
++    if (ww <= 0 || wh <= 0) { free(c->pixels); return; }
++
++    GLuint src_tex = 0, src_fbo = 0;
++    float u1 = 1, v1 = 1;
++    if (c->fb >= 0 && c->fb < g_nrfb && g_rfb[c->fb].fbo) {
++        const rfb *f = &g_rfb[c->fb];
++        src_tex = f->tex;
++        src_fbo = f->fbo;
++        u1 = (float)(SW * g_scale) / (float)f->w;
++        v1 = (float)(SH * g_scale) / (float)f->h;
++    } else if (c->pixels) {
++        if (!g_show_tex) g_show_tex = new_texture(SW, SH, NULL, GL_LINEAR);
++        glBindTexture(GL_TEXTURE_2D, g_show_tex);
++        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, SW, SH, 0, GL_RGBA, GL_UNSIGNED_BYTE, c->pixels);
++        src_tex = g_show_tex;
++    }
++    if (src_tex) capture(src_fbo, SW * g_scale, SH * g_scale, src_fbo ? NULL : c->pixels);
++    free(c->pixels);
++
++    glBindFramebuffer(GL_FRAMEBUFFER, 0);
++    glViewport(0, 0, ww, wh);
++    glDisable(GL_SCISSOR_TEST);
++    glDisable(GL_DEPTH_TEST);
++    glDisable(GL_BLEND);
++    glColorMask(1, 1, 1, 1);
++    glClearColor(0, 0, 0, 1);
++    glClear(GL_COLOR_BUFFER_BIT);
++    glUseProgram(g_blit);
++    if (src_tex) {
++        /* Letterboxed at the PSP's aspect. */
++        float w = (float)ww, h = w * SH / SW;
++        if (h > (float)wh) { h = (float)wh; w = h * SW / SH; }
++        const float x0 = ((float)ww - w) / 2, y0 = ((float)wh - h) / 2;
++        glBindTexture(GL_TEXTURE_2D, src_tex);
++        glUniform4i(g_b_mode, 0, 0, 0, 0);
++        blit_quad(x0, y0, x0 + w, y0 + h, ww, wh, 0, 0, u1, v1);
++    }
++
++    host_mutex_lock(&g_m);
++    if (g_ovl_dirty) {
++        if (g_ovl) {
++            if (!g_ovl_tex) g_ovl_tex = new_texture(1, 1, NULL, GL_NEAREST);
++            glBindTexture(GL_TEXTURE_2D, g_ovl_tex);
++            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, g_ovl_w, g_ovl_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, g_ovl);
++        }
++        g_ovl_dirty = 0;
++    }
++    const int ow = g_ovl ? g_ovl_w : 0, oh = g_ovl ? g_ovl_h : 0;
++    host_mutex_unlock(&g_m);
++    if (ow && g_ovl_tex) {
++        glEnable(GL_BLEND);
++        glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ZERO);
++        glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
++        glBindTexture(GL_TEXTURE_2D, g_ovl_tex);
++        glUniform4i(g_b_mode, 1, 0, 0, 0);
++        blit_quad(0, 0, (float)ow, (float)oh, ww, wh, 0, 0, 1, 1);
++        glDisable(GL_BLEND);
++    }
++
++    g_host.swap(g_host.user);
++    glUseProgram(g_prog);
++    glBindVertexArray(g_vao);
++    glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
++    g_applied_valid = 0;
++}
++
++static void play(gframe *f) {
++    glUseProgram(g_prog);
++    glBindVertexArray(g_vao);
++    glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
++    if (f->vtx.n) glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)f->vtx.n, f->vtx.p, GL_STREAM_DRAW);
++    g_applied_valid = 0;
++
++    for (size_t at = 0; at < f->cmd.n; ) {
++        const chead *h = (const chead *)(f->cmd.p + at);
++        at += h->size;
++        switch (h->op) {
++        case C_FB_NEW: {
++            const c_fb_new *c = (const c_fb_new *)h;
++            fb_new(c->id, c->w, c->hgt);
++            break;
++        }
++        case C_FB_FREE: fb_free(((const c_id *)h)->id); break;
++        case C_FB_BIND: fb_bind(((const c_id *)h)->id); break;
++        case C_TEX_NEW: {
++            const c_tex_new *c = (const c_tex_new *)h;
++            g_rtex = (GLuint *)grow(g_rtex, &g_nrtex, c->id, sizeof *g_rtex);
++            if (!g_rtex[c->id]) g_rtex[c->id] = new_texture(c->w, c->hgt, c->pixels, GL_NEAREST);
++            else {
++                glBindTexture(GL_TEXTURE_2D, g_rtex[c->id]);
++                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, c->w, c->hgt, 0, GL_RGBA, GL_UNSIGNED_BYTE, c->pixels);
++            }
++            free(c->pixels);
++            g_applied_valid = 0;             /* the texture binding moved */
++            break;
++        }
++        case C_TEX_FREE: {
++            const int id = ((const c_id *)h)->id;
++            if (id < g_nrtex && g_rtex[id]) { glDeleteTextures(1, &g_rtex[id]); g_rtex[id] = 0; }
++            g_applied_valid = 0;
++            break;
++        }
++        case C_DRAW: {
++            const c_draw *c = (const c_draw *)h;
++            if (!g_cur_fb_h) break;
++            apply(&c->s);
++            glDrawArrays(GL_TRIANGLES, (GLint)c->first, (GLsizei)c->count);
++            break;
++        }
++        case C_PRESENT:
++            present((const c_present *)h);
++            g_cur_fb_h = 0;
++            break;
++        }
++    }
++}
++
++static void *render_thread(void *arg) {
++    (void)arg;
++    const int r = setup();
++    host_mutex_lock(&g_m);
++    g_init_result = r == 0 ? 1 : -1;
++    host_cond_broadcast(&g_cv);
++    host_mutex_unlock(&g_m);
++    if (r != 0) return NULL;
++
++    for (;;) {
++        host_mutex_lock(&g_m);
++        while (g_pending < 0) host_cond_wait(&g_cv, &g_m);
++        gframe *f = &g_frames[g_pending];
++        host_mutex_unlock(&g_m);
++
++        play(f);
++
++        host_mutex_lock(&g_m);
++        g_pending = -1;
++        host_cond_broadcast(&g_cv);
++        host_mutex_unlock(&g_m);
++    }
++    return NULL;
++}
++
++int psp_render_gl_start(const psp_gl_host *host, int scale) {
++    if (g_started) return 0;
++    g_host = *host;
++    g_scale = scale > 0 ? scale : 1;
++    host_thread t;
++    if (host_thread_create(&t, 1 << 20, render_thread, NULL) != 0) return -1;
++    host_mutex_lock(&g_m);
++    while (!g_init_result) host_cond_wait(&g_cv, &g_m);
++    const int ok = g_init_result > 0;
++    host_mutex_unlock(&g_m);
++    if (!ok) { fputs("render_gl: no usable GL context\n", stderr); return -1; }
++    g_started = 1;
++    return 0;
++}

@@ -24,7 +24,8 @@ boots to its language selection screen.
 | `host/utility.c` | sceUtility savedata (to `work/root/ms/PSP/SAVEDATA`) and system message dialogs |
 | `seeds/eboot.txt` | EBOOT functions only reached through a register-built address |
 | `host/input.c` | controller: scripted presses, the window's keys, frame snapshots |
-| `host/window.c` | a Windows window that shows the framebuffer, reads the keyboard, and has the Multiplayer menu |
+| `host/window.c` | a Windows window: the OpenGL context psprecomp's GL renderer draws with (or the software renderer's framebuffer), the keyboard, the FPS overlay (F3), the Multiplayer menu |
+| `host/atrac.c`, `host/mpeg.c` | sceAtrac3plus and sceMpeg with their bookkeeping but no decoders yet: music is silent, movies black |
 | `host/lobby.c` | "Create Server" / "Join Server": rooms by code, settings in `<root>/net.cfg` |
 | `host/adhoc.c` | sceNet, sceNetAdhoc (PDP/PTP), sceNetAdhocctl and sceWlan over the room network |
 | `host/net/` | the room network: protocol (`proto.h`), hub, client, sockets/threads for Windows and POSIX |
@@ -78,9 +79,14 @@ another folder with `-Fonts <folder>`. Without them the text is blank.
 .\scripts\run.ps1 -Window            # close the window to stop
 ```
 
-Keys: arrows = D-pad, X = Cross, S = Circle, Z = Square, A = Triangle,
-Q = L, W = R, Space/Enter = Start, V/Backspace = Select, I/J/K/L = stick.
-The game is held to 60 frames a second there.
+Keys: W/A/S/D = analog stick, arrows = D-pad, K or Space = Cross, L = Circle,
+J = Square, I = Triangle, Q = L, E = R, Enter = Start, V/Backspace = Select.
+F3 shows or hides the FPS line. The game is held to 60 frames a second there.
+
+The window draws with OpenGL at `-Scale` times the PSP's resolution (default
+2). `-Renderer software` uses psprecomp's reference rasteriser instead: slow
+(about 9 FPS in the village), but it is the one the GL renderer is checked
+against.
 
 There is no on-screen keyboard: when the game asks for text (the character
 name) it gets `-Name`, `Hunter` by default: `.\scripts\run.ps1 -Window -Name "Pateeer"`.
