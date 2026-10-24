@@ -39,6 +39,7 @@
 #include "atrac.h"
 #include "mpeg.h"
 #include "audio.h"
+#include "gamepad.h"
 #include "hle_mhfu.h"
 #include "input.h"
 #include "libfont.h"
@@ -432,6 +433,7 @@ int main(int argc, char **argv) {
             }
         }
         else fprintf(stderr, "no window (only on Windows); running without one\n");
+        if (mhfu_gamepad_start() != 0) fprintf(stderr, "no controller support in this build\n");
         /* Sound only with a window: scripted runs without one stay quiet. */
         if (mhfu_audio_start() != 0) fprintf(stderr, "no audio output; running silent\n");
     }
