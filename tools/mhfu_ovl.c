@@ -138,8 +138,12 @@ int main(int argc, char **argv) {
          * whatever precedes it. */
         uint32_t p = o - 4, zeros = 0;
         while (p > HDR && !rd(p)) { p -= 4; zeros++; }
+        /* The delay slot may be a nop, which the loop above took for padding:
+         * then `p` is the jump itself. Missing that case left 40 functions of
+         * game_sub.ovl undiscovered (each a dispatch miss in the village). */
         int after_return = p >= HDR + 4 && (rd(p - 4) == 0x03E00008u ||  /* jr $ra; delay */
-                                            (rd(p - 4) >> 26) == 0x02);   /* j; delay      */
+                                            (rd(p - 4) >> 26) == 0x02 ||  /* j; delay      */
+                                            (zeros && (rd(p) == 0x03E00008u || (rd(p) >> 26) == 0x02)));
         if (after_return || zeros >= 2) starts[nstart++] = g_base + o;
     }
     for (uint32_t i = 0; i < nstart; i++) add_rel(g_base + seg_len + 4 * i, R_MIPS_32);

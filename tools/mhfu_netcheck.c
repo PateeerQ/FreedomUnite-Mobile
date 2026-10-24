@@ -1,0 +1,159 @@
+/* MHFU-Android -- an end-to-end check of the room network, without the game.
+ *
+ *     mhfu_netcheck host            create a room (in-app hub), wait for a guest
+ *     mhfu_netcheck join CODE       find the room on the LAN and talk to the host
+ *     mhfu_netcheck relay HOST      create a room on a standalone hub, then
+ *     mhfu_netcheck join CODE HOST  join it there
+ *
+ * The host joins ad hoc group "MHFUTEST", listens for PTP on port 200 and
+ * echoes PDP on port 100. The guest scans, joins the group, sends a broadcast
+ * and a unicast datagram, opens a PTP connection and checks the echo. Both
+ * print PASS or FAIL. */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "net/client.h"
+#include "net/hub.h"
+#include "net/sys.h"
+
+static const char TEST_GROUP[MHN_GROUP_LEN] = "MHFUTEST";
+
+static int wait_event(int want, int ms) {
+    uint64_t until = net_now_ms() + (uint64_t)ms;
+    while (net_now_ms() < until) {
+        int ev, err;
+        while (mhn_ctl_next_event(&ev, &err)) if (ev == want) return 0;
+        net_sleep_ms(10);
+    }
+    return -1;
+}
+
+#define CHECK(cond, what) do { if (!(cond)) { printf("FAIL: %s\n", what); return 1; } printf("ok: %s\n", what); } while (0)
+
+static int host(const char *relay) {
+    char code[MHN_CODE_LEN];
+    mhn_hub *hub = NULL;
+    uint8_t mac[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
+    if (relay) {
+        CHECK(mhn_client_start(relay, MHN_PORT, 1, NULL, mac, "Host") == MHN_OK, "room created on the relay");
+    } else {
+        hub = mhn_hub_new(0, 1, 0);
+        CHECK(hub && mhn_hub_make_room(hub, code) == 0 && mhn_hub_start_thread(hub) == 0, "in-app hub up");
+        CHECK(mhn_client_start("127.0.0.1", mhn_hub_port(hub), 0, code, mac, "Host") == MHN_OK, "host in its own room");
+    }
+    mhn_client_code(code);
+    printf("ROOM %s\n", code);
+    fflush(stdout);
+
+    mhn_ctl_connect(TEST_GROUP);
+    CHECK(wait_event(MHN_EV_CONNECT, 3000) == 0, "group created");
+    int pdp = mhn_pdp_create(100);
+    int lis = mhn_ptp_listen(200, 4);
+    CHECK(pdp > 0 && lis > 0, "sockets open");
+
+    int echoed = 0, accepted = 0, conn = 0, streamed = 0;
+    uint64_t until = net_now_ms() + 30000;
+    while (net_now_ms() < until && !(echoed >= 2 && streamed >= 100000)) {
+        uint8_t from[6], buf[2048];
+        uint16_t port;
+        int len = sizeof buf;
+        if (mhn_pdp_recv(pdp, from, &port, buf, &len) == 0) {
+            mhn_pdp_send(pdp, from, port, buf, len);
+            echoed++;
+        }
+        if (!conn) {
+            uint8_t pm[6];
+            uint16_t pp;
+            conn = mhn_ptp_accept(lis, pm, &pp);
+            if (conn < 0) conn = 0;
+        }
+        if (conn) {
+            len = sizeof buf;
+            if (mhn_ptp_recv(conn, buf, &len) == 0) { mhn_ptp_send(conn, buf, len); accepted = 1; streamed += len; }
+        }
+        net_sleep_ms(5);
+    }
+    CHECK(echoed >= 2, "echoed the guest's datagrams");
+    CHECK(accepted, "accepted and echoed a PTP connection");
+    net_sleep_ms(1500);   /* let the guest read the echo before the room closes */
+    mhn_ptp_close(conn);
+    mhn_client_stop();
+    if (hub) { mhn_hub_stop(hub); mhn_hub_free(hub); }
+    printf("PASS\n");
+    return 0;
+}
+
+static int join(const char *code, const char *relay) {
+    char host[64];
+    uint16_t port = MHN_PORT;
+    if (relay) snprintf(host, sizeof host, "%s", relay);
+    else CHECK(mhn_lan_find(code, host, sizeof host, &port, 3000) == 0, "room found on the LAN");
+    uint8_t mac[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x02 };
+    CHECK(mhn_client_start(host, port, 0, code, mac, "Guest") == MHN_OK, "joined the room");
+
+    mhn_ctl_scan();
+    CHECK(wait_event(MHN_EV_SCAN, 3000) == 0, "scan finished");
+    mhn_scan_entry s[16];
+    int n = mhn_ctl_scan_results(s, 16);
+    CHECK(n == 1 && memcmp(s[0].group, TEST_GROUP, MHN_GROUP_LEN) == 0, "scan sees the host's group");
+    uint8_t host_mac[6];
+    memcpy(host_mac, s[0].bssid, 6);
+
+    mhn_ctl_connect(TEST_GROUP);
+    CHECK(wait_event(MHN_EV_CONNECT, 3000) == 0, "joined the group");
+    net_sleep_ms(200);
+    mhn_peer peers[16];
+    CHECK(mhn_ctl_peers(peers, 16) == 1 && strcmp(peers[0].nick, "Host") == 0, "peer list has the host");
+
+    int pdp = mhn_pdp_create(0);
+    static const uint8_t bc[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+    mhn_pdp_send(pdp, bc, 100, "broadcast", 9);
+    mhn_pdp_send(pdp, host_mac, 100, "unicast", 7);
+    int got = 0;
+    uint64_t until = net_now_ms() + 3000;
+    while (got < 2 && net_now_ms() < until) {
+        char buf[64];
+        int len = sizeof buf;
+        if (mhn_pdp_recv(pdp, NULL, NULL, buf, &len) == 0) got++;
+        else net_sleep_ms(5);
+    }
+    CHECK(got == 2, "both datagrams echoed");
+
+    int c = mhn_ptp_open(0, host_mac, 200);
+    mhn_ptp_connect(c);
+    until = net_now_ms() + 3000;
+    mhn_ptp_stat st;
+    do { mhn_ptp_stat_of(c, &st); net_sleep_ms(5); } while (st.state != MHN_PTP_ESTABLISHED && net_now_ms() < until);
+    CHECK(st.state == MHN_PTP_ESTABLISHED, "PTP connected");
+    static char big[100000];
+    for (int i = 0; i < (int)sizeof big; i++) big[i] = (char)(i * 7);
+    mhn_ptp_send(c, big, sizeof big);
+    static char back[100000];
+    int have = 0;
+    until = net_now_ms() + 5000;
+    while (have < (int)sizeof back && net_now_ms() < until) {
+        int len = (int)sizeof back - have;
+        if (mhn_ptp_recv(c, back + have, &len) == 0) have += len;
+        else net_sleep_ms(2);
+    }
+    CHECK(have == (int)sizeof big && memcmp(big, back, sizeof big) == 0, "100 KB PTP echo intact");
+
+    int r = mhn_ptp_open(0, host_mac, 999);
+    mhn_ptp_connect(r);
+    net_sleep_ms(500);
+    mhn_ptp_stat_of(r, &st);
+    CHECK(st.state == MHN_PTP_CLOSED, "connect to a closed port refused");
+    mhn_client_stop();
+    printf("PASS\n");
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    if (argc >= 2 && !strcmp(argv[1], "host")) return host(NULL);
+    if (argc >= 3 && !strcmp(argv[1], "relay")) return host(argv[2]);
+    if (argc >= 3 && !strcmp(argv[1], "join")) return join(argv[2], argc >= 4 ? argv[3] : NULL);
+    fprintf(stderr, "usage: mhfu_netcheck host | relay HOST | join CODE [HOST]\n");
+    return 2;
+}
