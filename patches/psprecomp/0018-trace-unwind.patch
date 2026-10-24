@@ -1,0 +1,25 @@
+diff --git a/src/dispatch.c b/src/dispatch.c
+index b05bf72..ffa1be2 100644
+--- a/src/dispatch.c
++++ b/src/dispatch.c
+@@ -208,7 +208,19 @@ int psp_ra_is_jump(uint32_t ra) {
+     const psp_frame *f = psp_cpu.frame;
+     if (!f || !f->ret || ra == f->ret) return 0;
+     for (const psp_frame *g = f->prev; g && g->ret; g = g->prev)
+-        if (g->ret == ra) { psp_cpu.unwind = ra; return 0; }
++        if (g->ret == ra) {
++            /* PSPRECOMP_TRACE_UNWIND=1: name each unwind. Every frame between
++             * here and `ra` returns without running the rest of its body,
++             * epilogue included, so a wrong one shows up later as $sp left
++             * low and a caller reading a saved $ra from someone else's frame. */
++            static int trace = -1, shown;
++            if (trace < 0) { const char *v = getenv("PSPRECOMP_TRACE_UNWIND"); trace = v && v[0] == '1'; }
++            if (trace && shown++ < 32)
++                fprintf(stderr, "unwind to 0x%08X (innermost frame expects 0x%08X), in fn 0x%08X, sp 0x%08X\n",
++                        ra, f->ret, psp_trace_last(), psp_cpu.r[29]);
++            psp_cpu.unwind = ra;
++            return 0;
++        }
+     return 1;
+ }
+ 
