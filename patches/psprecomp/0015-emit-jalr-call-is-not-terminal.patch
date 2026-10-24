@@ -1,0 +1,19 @@
+diff --git a/tools/allegrexrecomp/emit.c b/tools/allegrexrecomp/emit.c
+index 238a51d..eafa264 100644
+--- a/tools/allegrexrecomp/emit.c
++++ b/tools/allegrexrecomp/emit.c
+@@ -810,7 +810,13 @@ static void emit_function(ectx *c, const a_func *fn) {
+         a_decode(fetch(an, a), a, &in);
+ 
+         if (c->is_label[i]) { note_label(c, a); fprintf(f, "L_%08X: PSP_MARK(0x%08Xu);\n", a, a); }
+-        last_terminal = in.is_return || in.is_indirect ||
++        /* A call comes back, so it never ends the flow: a body whose last
++         * instruction is a `jalr` falls into whatever follows the return site.
++         * Counting `jalr` as terminal (it is indirect) dropped that fall-out --
++         * MHFU's 0x088C804C, a jump-table case ending in a virtual call, just
++         * returned, unwinding its function without its epilogue: $sp stayed 32
++         * low and the caller read a saved $ra out of the callee's frame. */
++        last_terminal = in.is_return || (in.is_indirect && !in.is_call) ||
+                         (in.is_jump && !in.is_call);
+         comment(c, &in);
+ 
