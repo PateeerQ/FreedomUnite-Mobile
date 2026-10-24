@@ -120,7 +120,7 @@ set(MHFU_FFMPEG_DIR "${CMAKE_CURRENT_SOURCE_DIR}/deps/ffmpeg" CACHE PATH "FFmpeg
 if(EXISTS "${MHFU_FFMPEG_DIR}/include/libavcodec/avcodec.h")
     message(STATUS "mhfu_host: FFmpeg from ${MHFU_FFMPEG_DIR}")
     target_include_directories(mhfu_host PRIVATE "${MHFU_FFMPEG_DIR}/include")
-    foreach(lib avformat avcodec swscale swresample avutil)
+    foreach(lib avcodec swscale swresample avutil)
         find_library(MHFU_FF_${lib} ${lib} PATHS "${MHFU_FFMPEG_DIR}/lib" NO_DEFAULT_PATH REQUIRED)
         target_link_libraries(mhfu_host PRIVATE ${MHFU_FF_${lib}})
     endforeach()
