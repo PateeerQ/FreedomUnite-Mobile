@@ -28,6 +28,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "psprecomp/cpu.h"
 #include "psprecomp/dispatch.h"
@@ -90,6 +91,15 @@ typedef struct {
     int      failed;            /* FFmpeg could not open it: fall back to bookkeeping */
     int      draining;          /* the stream is used up; the decoder is emptying */
     int      ended;             /* demuxer and decoder both drained */
+    /* The sound: a second cursor over buf picks out the audio packets into
+     * aes, ATRAC3+ frames each with an 8-byte header (0F D0, size). */
+    size_t   apos;
+    uint8_t *aes;
+    size_t   alen, acap;
+    AVCodecContext *adec;
+    AVFrame  *aframe;
+    AVPacket *apkt;
+    int      afailed;
 #endif
 } mpeg_ctx;
 
@@ -162,10 +172,15 @@ static int all_put(const mpeg_ctx *c) {
 static int engine_live(const mpeg_ctx *c) { return c->dec && !c->failed; }
 
 static void stream_append(mpeg_ctx *c, const uint8_t *p, size_t n) {
-    if (c->pos > ((size_t)1 << 20) && c->pos * 2 > c->len) {   /* drop what was demuxed */
-        memmove(c->buf, c->buf + c->pos, c->len - c->pos);
-        c->len -= c->pos;
-        c->pos = 0;
+    /* Sound that lags far behind the pictures (a game that never asks for
+     * it) is given up on, so the copy does not grow without end. */
+    if (c->dec && c->pos > c->apos + ((size_t)2 << 20)) c->apos = c->pos;
+    const size_t lo = c->dec && c->apos < c->pos ? c->apos : c->pos;
+    if (lo > ((size_t)1 << 20) && lo * 2 > c->len) {           /* drop what both cursors passed */
+        memmove(c->buf, c->buf + lo, c->len - lo);
+        c->len -= lo;
+        c->pos -= lo;
+        c->apos = c->apos >= lo ? c->apos - lo : 0;
     }
     if (c->len + n > c->cap) {
         size_t cap = c->cap ? c->cap : (size_t)1 << 20;
@@ -191,6 +206,13 @@ static void engine_close(mpeg_ctx *c) {
     c->buf = NULL;
     c->len = c->cap = c->pos = 0;
     c->draining = c->ended = 0;
+    avcodec_free_context(&c->adec);
+    av_frame_free(&c->aframe);
+    av_packet_free(&c->apkt);
+    free(c->aes);
+    c->aes = NULL;
+    c->alen = c->acap = c->apos = 0;
+    c->afailed = 0;
 }
 
 static int engine_fail(mpeg_ctx *c, const char *what) {
@@ -211,47 +233,39 @@ static int engine_open(mpeg_ctx *c) {
     if (!c->parser || !c->dec || avcodec_open2(c->dec, codec, NULL) < 0) return engine_fail(c, "open the decoder");
     c->frame = av_frame_alloc();
     c->pkt = av_packet_alloc();
-    c->pos = c->header_off;                   /* the PSMF header is not MPEG-PS */
+    c->pos = c->apos = c->header_off;         /* the PSMF header is not MPEG-PS */
     c->queued = (uint32_t)(c->len - c->pos);
     return 1;
 }
 
 static uint32_t be16(const uint8_t *p) { return (uint32_t)p[0] << 8 | p[1]; }
 
-/* The next video payload out of the program stream, or NULL when the next
- * packet is not all in yet. Pack headers, padding and audio are skipped. A
- * PSMF is 2048-byte packs, so a PES never crosses the end of what was put by
- * more than a pack. *n is 0 at the end of the stream. */
-static const uint8_t *demux_video(mpeg_ctx *c, size_t *n) {
+/* The next payload of one kind out of the program stream, from *cursor:
+ * video (PES 0xE0-0xEF), or audio (private stream 1, 0xBD, less the 4 bytes
+ * PSMF puts before the ATRAC3+ data). NULL when the next packet is not all
+ * in yet; *n is 0 at the end of the stream. A PSMF is 2048-byte packs, so a
+ * PES never runs more than a pack past what was put. */
+static const uint8_t *demux_next(mpeg_ctx *c, size_t *cursor, int audio, size_t *n) {
     for (;;) {
-        const size_t have = c->len - c->pos;
-        const uint8_t *p = c->buf + c->pos;
+        const size_t have = c->len - *cursor;
+        const uint8_t *p = c->buf + *cursor;
         if (have < 6) { *n = 0; return all_put(c) ? p : NULL; }
-        if (p[0] != 0 || p[1] != 0 || p[2] != 1) { c->pos++; continue; }   /* resync */
+        if (p[0] != 0 || p[1] != 0 || p[2] != 1) { (*cursor)++; continue; }   /* resync */
         const uint8_t id = p[3];
         if (id == 0xBA) {                                     /* pack header (MPEG-2) */
             if (have < 14) { *n = 0; return all_put(c) ? p : NULL; }
-            c->pos += 14 + (p[13] & 7);
+            *cursor += 14 + (p[13] & 7);
             continue;
         }
-        if (id == 0xB9) { c->pos += 4; continue; }           /* end code */
+        if (id == 0xB9) { *cursor += 4; continue; }          /* end code */
         const size_t total = 6 + be16(p + 4);
         if (have < total) { *n = 0; return all_put(c) ? p : NULL; }
-        static int listed;
-        if (getenv("MHFU_TRACE_MPEG") && listed++ < 24)
-            fprintf(stderr, "mpeg: at 0x%zX id %02X len %zu  %02X %02X %02X %02X %02X %02X\n", c->pos, id, total,
-                    p[6], p[7], p[8], p[9], p[10], p[11]);
-        c->pos += total;
-        if (id < 0xE0 || id > 0xEF || total < 9) continue;   /* not video */
-        const size_t start = 9 + p[8];
+        *cursor += total;
+        const int wanted = audio ? id == 0xBD : id >= 0xE0 && id <= 0xEF;
+        if (!wanted || total < 9) continue;
+        const size_t start = 9 + p[8] + (audio ? 4 : 0);
         if (start > total) continue;
         *n = total - start;
-        static int shown;
-        if (getenv("MHFU_TRACE_MPEG") && p[8] && shown++ < 4) {
-            fprintf(stderr, "mpeg: PES %02X len %zu hdr %u:", id, total, p[8]);
-            for (size_t i = 0; i < 64 && i < total; i++) fprintf(stderr, " %02X", p[i]);
-            fprintf(stderr, "\n");
-        }
         return p + start;
     }
 }
@@ -265,7 +279,7 @@ static int engine_frame(mpeg_ctx *c) {
         if (r == AVERROR_EOF) { c->ended = 1; return -1; }
         if (c->draining) { c->ended = 1; return -1; }
         size_t n = 0;
-        const uint8_t *es = demux_video(c, &n);
+        const uint8_t *es = demux_next(c, &c->pos, 0, &n);
         c->queued = (uint32_t)(c->len - c->pos);              /* the ringbuffer frees it */
         if (!es) return 0;                                    /* wait for more */
         if (!n) {                                             /* the end: flush everything */
@@ -317,6 +331,86 @@ static void engine_write(mpeg_ctx *c, uint32_t dst, uint32_t width) {
     uint8_t *planes[4] = { p, NULL, NULL, NULL };
     int strides[4] = { (int)width * bpp, 0, 0, 0 };
     sws_scale(c->sws, (const uint8_t *const *)c->frame->data, c->frame->linesize, 0, h, planes, strides);
+}
+
+/* ---- the movie's sound: ATRAC3+ frames out of the audio packets ----------- */
+
+static void aes_append(mpeg_ctx *c, const uint8_t *p, size_t n) {
+    if (c->alen + n > c->acap) {
+        size_t cap = c->acap ? c->acap : 16384;
+        while (cap < c->alen + n) cap *= 2;
+        uint8_t *b = (uint8_t *)realloc(c->aes, cap);
+        if (!b) return;
+        c->aes = b;
+        c->acap = cap;
+    }
+    memcpy(c->aes + c->alen, p, n);
+    c->alen += n;
+}
+
+static int audio_open(mpeg_ctx *c, int block_align) {
+    const AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_ATRAC3P);
+    c->adec = codec ? avcodec_alloc_context3(codec) : NULL;
+    if (c->adec) {
+        c->adec->sample_rate = 44100;
+        av_channel_layout_default(&c->adec->ch_layout, 2);
+        c->adec->block_align = block_align;
+    }
+    if (!c->adec || avcodec_open2(c->adec, codec, NULL) < 0) {
+        fprintf(stderr, "mpeg: no ATRAC3+ decoder; the movie is silent\n");
+        avcodec_free_context(&c->adec);
+        c->afailed = 1;
+        return 0;
+    }
+    c->aframe = av_frame_alloc();
+    c->apkt = av_packet_alloc();
+    return 1;
+}
+
+/* The next frame's samples into out as interleaved stereo 16-bit; returns the
+ * samples written, 0 when there is no frame (yet). Each frame is an 8-byte
+ * header -- 0F D0, then in the low 10 bits of the next two bytes n, where the
+ * frame is n * 8 + 16 bytes header included (PPSSPP's MpegDemux) -- and the
+ * ATRAC3+ data. */
+static int audio_frame(mpeg_ctx *c, int16_t *out, int max_samples) {
+    for (;;) {
+        if (c->alen >= 8 && c->aes[0] == 0x0F && c->aes[1] == 0xD0) {
+            const size_t fs = ((((size_t)c->aes[2] & 3) << 8) | c->aes[3]) * 8 + 16;
+            if (c->alen >= fs) {
+                if (!c->adec && !audio_open(c, (int)fs - 8)) return 0;
+                c->apkt->data = c->aes + 8;
+                c->apkt->size = (int)fs - 8;
+                const int ok = avcodec_send_packet(c->adec, c->apkt) >= 0 &&
+                               avcodec_receive_frame(c->adec, c->aframe) >= 0;
+                memmove(c->aes, c->aes + fs, c->alen - fs);
+                c->alen -= fs;
+                if (!ok) continue;
+                const AVFrame *f = c->aframe;
+                const int chans = f->ch_layout.nb_channels;
+                const int n = f->nb_samples < max_samples ? f->nb_samples : max_samples;
+                for (int i = 0; i < n; i++)
+                    for (int ch = 0; ch < 2; ch++) {
+                        const int src = chans > 1 ? ch : 0;
+                        float v = f->format == AV_SAMPLE_FMT_FLTP ? ((const float *)f->extended_data[src])[i]
+                                : f->format == AV_SAMPLE_FMT_FLT ? ((const float *)f->data[0])[i * chans + src]
+                                : 0.0f;
+                        v = v > 1.0f ? 1.0f : v < -1.0f ? -1.0f : v;
+                        out[i * 2 + ch] = (int16_t)(v * 32767.0f);
+                    }
+                return n;
+            }
+        } else if (c->alen >= 2) {                            /* lost the sync: find it again */
+            size_t i = 1;
+            while (i + 1 < c->alen && !(c->aes[i] == 0x0F && c->aes[i + 1] == 0xD0)) i++;
+            memmove(c->aes, c->aes + i, c->alen - i);
+            c->alen -= i;
+            if (c->alen >= 2 && c->aes[0] == 0x0F && c->aes[1] == 0xD0) continue;
+        }
+        size_t n = 0;
+        const uint8_t *p = demux_next(c, &c->apos, 1, &n);
+        if (!p || !n) return 0;
+        aes_append(c, p, n);
+    }
 }
 #endif
 
@@ -618,10 +712,15 @@ static void hle_AvcDecode(void) {
             c->video_frame++;
         }
         static unsigned calls;
-        if (getenv("MHFU_TRACE_MPEG") && calls++ % 60 == 0)
-            fprintf(stderr, "mpeg: decode #%u got %d frames %u pos 0x%zX len 0x%zX put 0x%llX to 0x%08X width %u mode %d\n",
+        if (getenv("MHFU_TRACE_MPEG") && calls == 300) psp_ge_dump_next(4);   /* what draws the movie */
+        if (getenv("MHFU_TRACE_MPEG") && calls++ % 61 < 2) {
+            uint32_t da, ds, df;
+            psp_display_get(&da, &ds, &df);
+            fprintf(stderr, "mpeg: decode #%u got %d frames %u pos 0x%zX len 0x%zX put 0x%llX to 0x%08X width %u mode %d"
+                    " display 0x%08X/%u fmt %u\n",
                     calls, got, c->video_frame, c->pos, c->len, (unsigned long long)c->total_put, at, psp_arg(2),
-                    c->pixel_mode);
+                    c->pixel_mode, da, ds, df);
+        }
         update_avail(c);
         if (init && psp_mem_ptr(init, 4)) wr(init, got > 0 ? 1 : 0);
         psp_ret(0);
@@ -653,6 +752,26 @@ static void hle_AtracDecode(void) {
     if (!c) { psp_ret(0xFFFFFFFFu); return; }
     void *out = psp_mem_ptr(psp_arg(2), MPEG_ATRAC_OUT_SIZE);
     if (out) memset(out, 0, MPEG_ATRAC_OUT_SIZE);
+#if MHFU_FFMPEG
+    static unsigned all;
+    if (getenv("MHFU_TRACE_MPEG") && all++ % 100 == 0)
+        fprintf(stderr, "mpeg: at %.2f s: video %u frames (%.2f s of movie), audio %u frames (%.2f s)\n",
+                (double)clock() / CLOCKS_PER_SEC, c->video_frame, c->video_frame * 3003 / 90000.0,
+                c->audio_frame, c->audio_frame * 2048 / 44100.0);
+    /* 2048 stereo samples, or silence while there is no frame. */
+    if (out && engine_live(c) && !c->afailed) {
+        const int n = audio_frame(c, (int16_t *)out, MPEG_ATRAC_OUT_SIZE / 4);
+        static unsigned calls;
+        if (getenv("MHFU_TRACE_MPEG") && (calls++ % 100 == 0 || calls < 4)) {
+            int peak = 0;
+            for (int i = 0; i < n * 2; i++) {
+                const int v = ((const int16_t *)out)[i];
+                if (v > peak) peak = v; else if (-v > peak) peak = -v;
+            }
+            fprintf(stderr, "mpeg: audio #%u %d samples, peak %d\n", calls, n, peak);
+        }
+    }
+#endif
     c->audio_frame++;
     psp_ret(0);
 }
