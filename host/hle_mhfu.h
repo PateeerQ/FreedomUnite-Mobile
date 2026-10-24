@@ -17,4 +17,7 @@ int mhfu_overlays_missing(void);
 /* VTimer handler calls so far: MHFU's frame clock is one. */
 uint64_t mhfu_vtimer_fired(void);
 
+/* Host monotonic microseconds since the first call: the clock VTimers count. */
+uint64_t mhfu_clock_us(void);
+
 #endif
