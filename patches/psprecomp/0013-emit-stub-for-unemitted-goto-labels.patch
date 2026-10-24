@@ -1,0 +1,129 @@
+diff --git a/tools/allegrexrecomp/emit.c b/tools/allegrexrecomp/emit.c
+index 896728f..238a51d 100644
+--- a/tools/allegrexrecomp/emit.c
++++ b/tools/allegrexrecomp/emit.c
+@@ -18,6 +18,8 @@ static const char *const RN[32] = {
+     "r_t8","r_t9","r_k0","r_k1","r_gp","r_sp","r_fp","r_ra"
+ };
+ 
++#define MAX_BODY_LABELS 8192
++
+ typedef struct {
+     FILE *out;
+     const a_analysis *an;
+@@ -26,8 +28,16 @@ typedef struct {
+     uint8_t *is_slot;      /* per word: consumed as a delay slot */
+     uint32_t *entries;     /* interior labels that got a dispatch thunk */
+     int nentries, centries;
++    /* Per body: every `goto` target, and every label actually emitted. A
++     * target with no label (a delay slot, or data decoded as code) gets a
++     * dispatch stub at the end of the body instead of a C compile error. */
++    uint32_t gotos[MAX_BODY_LABELS], labels[MAX_BODY_LABELS];
++    int ngotos, nlabels;
+ } ectx;
+ 
++static void note_goto(ectx *c, uint32_t a)  { if (c->ngotos < MAX_BODY_LABELS) c->gotos[c->ngotos++] = a; }
++static void note_label(ectx *c, uint32_t a) { if (c->nlabels < MAX_BODY_LABELS) c->labels[c->nlabels++] = a; }
++
+ static void entry_push(ectx *c, uint32_t a) {
+     if (c->nentries == c->centries) {
+         int n = c->centries ? c->centries * 2 : 1024;
+@@ -607,9 +617,10 @@ static void emit_slot_alias(ectx *c, uint32_t a, const a_insn *slot, int falls_t
+     const uint32_t after = a + 8;
+ 
+     if (falls_through) {
+-        if (owned_by(an, after, owner)) fprintf(c->out, "    goto L_%08X;\n", after);
++        if (owned_by(an, after, owner)) { note_goto(c, after); fprintf(c->out, "    goto L_%08X;\n", after); }
+         else                            fprintf(c->out, "    return;\n");
+     }
++    note_label(c, a + 4);
+     fprintf(c->out, "L_%08X:\n", a + 4);
+     comment(c, slot);
+     emit_simple(c, slot, "    ");
+@@ -684,6 +695,7 @@ static void emit_function(ectx *c, const a_func *fn) {
+     const a_analysis *an = c->an;
+     FILE *f = c->out;
+     const uint32_t owner = fn->addr;
++    c->ngotos = c->nlabels = 0;
+ 
+     /* Pass 1: the label and delay-slot map. Complete for the whole module by
+      * the time this runs; repeated here because marking is monotone and nothing
+@@ -744,6 +756,7 @@ static void emit_function(ectx *c, const a_func *fn) {
+         for (uint32_t a = fn->start; a < fn->end; a += 4) {
+             if (!owned_by(an, a, owner) || !c->is_label[widx(an, a)]) continue;
+             if (c->is_slot[widx(an, a)]) continue;   /* only the inline copy is real */
++            note_goto(c, a);
+             fprintf(f, "    case 0x%08Xu: goto L_%08X;\n", a, a);
+         }
+         fprintf(f, "    default: break;\n");
+@@ -796,7 +809,7 @@ static void emit_function(ectx *c, const a_func *fn) {
+         a_insn in;
+         a_decode(fetch(an, a), a, &in);
+ 
+-        if (c->is_label[i]) fprintf(f, "L_%08X: PSP_MARK(0x%08Xu);\n", a, a);
++        if (c->is_label[i]) { note_label(c, a); fprintf(f, "L_%08X: PSP_MARK(0x%08Xu);\n", a, a); }
+         last_terminal = in.is_return || in.is_indirect ||
+                         (in.is_jump && !in.is_call);
+         comment(c, &in);
+@@ -867,7 +880,7 @@ static void emit_function(ectx *c, const a_func *fn) {
+              * has already run its copy, so it resumes after it explicitly. */
+             if (!have_slot) {
+                 if (owned_by(an, a + 8, owner) && c->is_label[widx(an, a + 8)])
+-                    fprintf(f, "        goto L_%08X;\n", a + 8);
++                    { note_goto(c, a + 8); fprintf(f, "        goto L_%08X;\n", a + 8); }
+                 else
+                     fprintf(f, "        psp_dispatch(0x%08Xu); return;\n", a + 8);
+             }
+@@ -891,7 +904,7 @@ static void emit_function(ectx *c, const a_func *fn) {
+                 if (in.is_call) fprintf(f, "        %s = 0x%08Xu;\n", RN[31], a + 8);
+                 if (owned_by(an, in.target, owner))
+                     { if (in.target <= a) fprintf(f, "        PSP_LOOP(0x%08Xu);\n", in.target);
+-                      fprintf(f, "        goto L_%08X;\n", in.target); }
++                      note_goto(c, in.target); fprintf(f, "        goto L_%08X;\n", in.target); }
+                 else
+                     { emit_static_call_tail(c, in.target); fprintf(f, "        return;\n"); }
+                 fprintf(f, "    }\n");
+@@ -916,9 +929,9 @@ static void emit_function(ectx *c, const a_func *fn) {
+                         fprintf(f, "      if (_c) {\n");
+                         comment(c, &slot);
+                         emit_simple(c, &slot, "        ");
+-                        fprintf(f, "        goto L_%08X; } }\n", in.target);
++                        note_goto(c, in.target); fprintf(f, "        goto L_%08X; } }\n", in.target);
+                     } else {
+-                        fprintf(f, "      if (_c) goto L_%08X; }\n", in.target);
++                        note_goto(c, in.target); fprintf(f, "      if (_c) goto L_%08X; }\n", in.target);
+                     }
+                 } else if (taken_slot) {
+                     fprintf(f, "      if (_c) {\n");
+@@ -1049,7 +1062,7 @@ static void emit_function(ectx *c, const a_func *fn) {
+         if (in.is_jump) {                        /* j */
+             if (have_slot) { comment(c, &slot); emit_simple(c, &slot, "    "); }
+             if (owned_by(an, in.target, owner) && !is_function(an, in.target)) {
+-                fprintf(f, "    goto L_%08X;\n", in.target);
++                note_goto(c, in.target); fprintf(f, "    goto L_%08X;\n", in.target);
+             } else {
+                 emit_static_call_tail(c, in.target);  /* tail call, and it must stay one */
+                 fprintf(f, "    return;\n");
+@@ -1108,6 +1121,22 @@ static void emit_function(ectx *c, const a_func *fn) {
+          * addresses are registered nowhere and a dispatch misses where the
+          * silent return at least let the run continue. */
+     }
++
++    /* A goto whose label was never emitted. Seen on MHFU's lobby_task: data
++     * decoded as code, where `blez` sits in another `blez`'s delay slot and
++     * targets the next delay slot, which gets no label of its own. The body
++     * did not compile. Such a target is reached by dispatch instead. */
++    int stubs = 0;
++    for (int g = 0; g < c->ngotos; g++) {
++        uint32_t t = c->gotos[g];
++        int have = 0;
++        for (int l = 0; l < c->nlabels && !have; l++) have = c->labels[l] == t;
++        for (int h = 0; h < g && !have; h++) have = c->gotos[h] == t;   /* stubbed already */
++        if (have) continue;
++        if (!stubs++) fprintf(f, "    return;\n");
++        fprintf(f, "L_%08X:   /* no label was emitted here: dispatch to it */\n", t);
++        fprintf(f, "    psp_dispatch(0x%08Xu);\n    return;\n", t);
++    }
+     fprintf(f, "}\n");
+ 
+     /* The real entry, plus one thunk per interior label so anything that can be
