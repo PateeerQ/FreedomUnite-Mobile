@@ -84,7 +84,7 @@ add_executable(mhfu_host host/main.c host/hle_mhfu.c host/input.c host/window.c 
 target_include_directories(mhfu_host PRIVATE "${MHFU_GEN_DIR}" host)
 target_link_libraries(mhfu_host PRIVATE psprecomp mhfu_net)
 if(WIN32)
-    target_link_libraries(mhfu_host PRIVATE user32 gdi32)
+    target_link_libraries(mhfu_host PRIVATE user32 gdi32 opengl32)
 endif()
 
 # Function-entry tracing: the report then names the last function reached and
