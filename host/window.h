@@ -8,6 +8,10 @@
 /* Open the window on its own thread, `scale` times 480x272. 0 on success. */
 int mhfu_window_start(int scale);
 
+/* Draw with psprecomp's GL backend into the window, at the window's scale.
+ * After mhfu_window_start. 0 on success; otherwise the renderer is unchanged. */
+int mhfu_window_gl(void);
+
 /* Nonzero once the user has closed the window. */
 int mhfu_window_closed(void);
 
