@@ -13,17 +13,31 @@
  * movie by accident. With the calls arriving and unimplemented, they returned
  * 0, "a frame decoded, more to come", forever: a black screen.
  *
- * Structures, sizes and error codes follow PPSSPP's Core/HLE/sceMpeg.cpp. A
- * real decoder (FFmpeg) would replace avc_step and write the frame. */
+ * Structures, sizes and error codes follow PPSSPP's Core/HLE/sceMpeg.cpp.
+ *
+ * With FFmpeg (MHFU_FFMPEG), the pictures are real, the way PPSSPP's media
+ * engine does it: every packet the game puts into the ringbuffer is also
+ * appended to a host-side copy of the stream, a small MPEG-PS demuxer here
+ * takes the video PES packets out of it, FFmpeg's H.264 parser and decoder
+ * turn them into pictures, and sceMpegAvcDecode writes the next one into the
+ * game's buffer. The ringbuffer frees what the demuxer has used. (FFmpeg's own
+ * PS demuxer cannot tell that a PSMF's video stream is H.264; PPSSPP also sets
+ * that by hand.) The movie's ATRAC3+ sound is still silence. */
 #include "mpeg.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "psprecomp/cpu.h"
 #include "psprecomp/dispatch.h"
 #include "psprecomp/hle.h"
 #include "psprecomp/mem.h"
+
+#if MHFU_FFMPEG
+#include <libavcodec/avcodec.h>
+#include <libswscale/swscale.h>
+#endif
 
 #define MPEG_ERROR_NO_DATA          0x80618001u
 #define MPEG_ERROR_INVALID_VALUE    0x806101FEu
@@ -61,6 +75,21 @@ typedef struct {
     uint32_t video_frame, audio_frame;
     uint32_t per_frame;         /* bytes one frame consumes */
     int      es[2];
+    uint32_t header_off;        /* the PSMF header's length: the stream starts there */
+    int      pixel_mode;        /* sceMpegAvcDecodeMode: 0-3, 565 to 8888 */
+#if MHFU_FFMPEG
+    /* The stream as put, from the file's start: [pos, len) not yet demuxed. */
+    uint8_t *buf;
+    size_t   len, cap, pos;
+    AVCodecParserContext *parser;
+    AVCodecContext  *dec;
+    AVFrame         *frame;
+    AVPacket        *pkt;
+    struct SwsContext *sws;
+    int      failed;            /* FFmpeg could not open it: fall back to bookkeeping */
+    int      draining;          /* the stream is used up; the decoder is emptying */
+    int      ended;             /* demuxer and decoder both drained */
+#endif
 } mpeg_ctx;
 
 static mpeg_ctx g_ctx[MAX_CTX];
@@ -101,9 +130,15 @@ static uint32_t analyze(mpeg_ctx *c, uint32_t addr, uint32_t *size_out) {
         c->frames = last > first ? (last - first) / TS_STEP + 1 : 1;
         c->per_frame = size / c->frames;
         if (c->per_frame < 512) c->per_frame = 512;
+        c->header_off = offset;
         c->analyzed = 1;
-        printf("mpeg: PSMF stream 0x%X bytes at 0x%X, %u frames (no decoder: playing as black)\n",
-               size, offset, c->frames);
+        printf("mpeg: PSMF stream 0x%X bytes at 0x%X, %u frames (%s)\n", size, offset, c->frames,
+#if MHFU_FFMPEG
+               "FFmpeg"
+#else
+               "no decoder: playing as black"
+#endif
+               );
     }
     return offset;
 }
@@ -115,12 +150,169 @@ static void update_avail(mpeg_ctx *c) {
     wr(c->ring + RB_AVAIL, (c->queued + PACKET - 1) / PACKET);
 }
 
+/* Everything of the file has been put: the header and the whole stream. */
+static int all_put(const mpeg_ctx *c) {
+    return c->analyzed && c->total_put >= (uint64_t)c->header_off + c->stream_size;
+}
+
+#if MHFU_FFMPEG
+/* ---- the decoder: FFmpeg over a copy of what was put ----------------------- */
+
+static int engine_live(const mpeg_ctx *c) { return c->dec && !c->failed; }
+
+static void stream_append(mpeg_ctx *c, const uint8_t *p, size_t n) {
+    if (c->pos > ((size_t)1 << 20) && c->pos * 2 > c->len) {   /* drop what was demuxed */
+        memmove(c->buf, c->buf + c->pos, c->len - c->pos);
+        c->len -= c->pos;
+        c->pos = 0;
+    }
+    if (c->len + n > c->cap) {
+        size_t cap = c->cap ? c->cap : (size_t)1 << 20;
+        while (cap < c->len + n) cap *= 2;
+        uint8_t *b = (uint8_t *)realloc(c->buf, cap);
+        if (!b) return;
+        c->buf = b;
+        c->cap = cap;
+    }
+    memcpy(c->buf + c->len, p, n);
+    c->len += n;
+}
+
+static void engine_close(mpeg_ctx *c) {
+    if (c->parser) av_parser_close(c->parser);
+    c->parser = NULL;
+    avcodec_free_context(&c->dec);
+    av_frame_free(&c->frame);
+    av_packet_free(&c->pkt);
+    sws_freeContext(c->sws);
+    c->sws = NULL;
+    free(c->buf);
+    c->buf = NULL;
+    c->len = c->cap = c->pos = 0;
+    c->draining = c->ended = 0;
+}
+
+static int engine_fail(mpeg_ctx *c, const char *what) {
+    fprintf(stderr, "mpeg: FFmpeg could not %s; the movie plays black\n", what);
+    c->failed = 1;
+    return 0;
+}
+
+/* The H.264 parser and decoder, once the header is in. 1 when open. */
+static int engine_open(mpeg_ctx *c) {
+    if (c->failed) return 0;
+    if (c->dec) return 1;
+    if (!c->analyzed || c->len < c->header_off) return 0;
+    const AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_H264);
+    if (!codec) return engine_fail(c, "find an H.264 decoder");
+    c->parser = av_parser_init(AV_CODEC_ID_H264);
+    c->dec = avcodec_alloc_context3(codec);
+    if (!c->parser || !c->dec || avcodec_open2(c->dec, codec, NULL) < 0) return engine_fail(c, "open the decoder");
+    c->frame = av_frame_alloc();
+    c->pkt = av_packet_alloc();
+    c->pos = c->header_off;                   /* the PSMF header is not MPEG-PS */
+    c->queued = (uint32_t)(c->len - c->pos);
+    return 1;
+}
+
+static uint32_t be16(const uint8_t *p) { return (uint32_t)p[0] << 8 | p[1]; }
+
+/* The next video payload out of the program stream, or NULL when the next
+ * packet is not all in yet. Pack headers, padding and audio are skipped. A
+ * PSMF is 2048-byte packs, so a PES never crosses the end of what was put by
+ * more than a pack. *n is 0 at the end of the stream. */
+static const uint8_t *demux_video(mpeg_ctx *c, size_t *n) {
+    for (;;) {
+        const size_t have = c->len - c->pos;
+        const uint8_t *p = c->buf + c->pos;
+        if (have < 6) { *n = 0; return all_put(c) ? p : NULL; }
+        if (p[0] != 0 || p[1] != 0 || p[2] != 1) { c->pos++; continue; }   /* resync */
+        const uint8_t id = p[3];
+        if (id == 0xBA) {                                     /* pack header (MPEG-2) */
+            if (have < 14) { *n = 0; return all_put(c) ? p : NULL; }
+            c->pos += 14 + (p[13] & 7);
+            continue;
+        }
+        if (id == 0xB9) { c->pos += 4; continue; }           /* end code */
+        const size_t total = 6 + be16(p + 4);
+        if (have < total) { *n = 0; return all_put(c) ? p : NULL; }
+        c->pos += total;
+        if (id < 0xE0 || id > 0xEF || total < 9) continue;   /* not video */
+        const size_t start = 9 + p[8];
+        if (start > total) continue;
+        *n = total - start;
+        return p + start;
+    }
+}
+
+/* Decode the next picture into c->frame: 1 for a picture, 0 for none yet
+ * (more of the stream is needed), -1 at the end. */
+static int engine_frame(mpeg_ctx *c) {
+    for (;;) {
+        int r = avcodec_receive_frame(c->dec, c->frame);
+        if (r == 0) return 1;
+        if (r == AVERROR_EOF) { c->ended = 1; return -1; }
+        if (c->draining) { c->ended = 1; return -1; }
+        size_t n = 0;
+        const uint8_t *es = demux_video(c, &n);
+        c->queued = (uint32_t)(c->len - c->pos);              /* the ringbuffer frees it */
+        if (!es) return 0;                                    /* wait for more */
+        if (!n) {                                             /* the end: flush everything */
+            uint8_t *out; int out_n;
+            av_parser_parse2(c->parser, c->dec, &out, &out_n, NULL, 0, AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0);
+            if (out_n) {
+                c->pkt->data = out; c->pkt->size = out_n;
+                avcodec_send_packet(c->dec, c->pkt);
+            }
+            avcodec_send_packet(c->dec, NULL);
+            c->draining = 1;
+            r = avcodec_receive_frame(c->dec, c->frame);
+            if (r == 0) return 1;
+            c->ended = 1;
+            return -1;
+        }
+        while (n > 0) {
+            uint8_t *out; int out_n;
+            const int used = av_parser_parse2(c->parser, c->dec, &out, &out_n, es, (int)n,
+                                              AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0);
+            if (used < 0) break;
+            es += used; n -= (size_t)used;
+            if (out_n) {
+                c->pkt->data = out; c->pkt->size = out_n;
+                avcodec_send_packet(c->dec, c->pkt);
+            }
+        }
+    }
+}
+
+/* The picture into the game's buffer, `width` pixels a row, in its pixel
+ * format: 0-3 are 565, 5551, 4444, 8888, red in the low bits. */
+static void engine_write(mpeg_ctx *c, uint32_t dst, uint32_t width) {
+    static const enum AVPixelFormat PF[4] = { AV_PIX_FMT_BGR565LE, AV_PIX_FMT_BGR555LE,
+                                              AV_PIX_FMT_BGR444LE, AV_PIX_FMT_RGBA };
+    const int mode = c->pixel_mode & 3, bpp = mode == 3 ? 4 : 2;
+    const int w = c->frame->width, h = c->frame->height;
+    if (!width || (int)width < w) width = (uint32_t)w;
+    uint8_t *p = (uint8_t *)psp_mem_ptr(dst, width * (uint32_t)h * (uint32_t)bpp);
+    if (!p) return;
+    c->sws = sws_getCachedContext(c->sws, w, h, (enum AVPixelFormat)c->frame->format, w, h, PF[mode],
+                                  SWS_POINT, NULL, NULL, NULL);
+    if (!c->sws) return;
+    uint8_t *planes[4] = { p, NULL, NULL, NULL };
+    int strides[4] = { (int)width * bpp, 0, 0, 0 };
+    sws_scale(c->sws, (const uint8_t *const *)c->frame->data, c->frame->linesize, 0, h, planes, strides);
+}
+#endif
+
 /* The video is over once the stream has been read in and used up, or the
  * frame count from the header has been shown. */
 static int video_end(const mpeg_ctx *c) {
     if (!c->analyzed) return 0;
+#if MHFU_FFMPEG
+    if (engine_live(c)) return c->ended;
+#endif
     if (c->video_frame >= c->frames) return 1;
-    return c->total_put >= c->stream_size && c->queued == 0;
+    return all_put(c) && c->queued == 0;
 }
 
 static void hle_Init(void)   { memset(g_ctx, 0, sizeof g_ctx); psp_ret(0); }
@@ -173,17 +365,36 @@ static void hle_Create(void) {
     for (int i = 0; i < MAX_CTX && !c; i++) if (g_ctx[i].used && g_ctx[i].handle == h) c = &g_ctx[i];
     for (int i = 0; i < MAX_CTX && !c; i++) if (!g_ctx[i].used) c = &g_ctx[i];
     if (!c) { psp_ret(MPEG_ERROR_NO_MEMORY); return; }
+#if MHFU_FFMPEG
+    engine_close(c);
+#endif
     memset(c, 0, sizeof *c);
     c->used = 1;
     c->handle = h;
     c->ring = ring;
+    c->pixel_mode = 3;              /* 8888 until sceMpegAvcDecodeMode says otherwise */
     psp_ret(0);
 }
 
 static void hle_Delete(void) {
     mpeg_ctx *c = ctx_of(psp_arg(0));
-    if (c) c->used = 0;
+    if (c) {
+#if MHFU_FFMPEG
+        engine_close(c);
+#endif
+        c->used = 0;
+    }
     psp_ret(c ? 0 : 0xFFFFFFFFu);
+}
+
+/* (mpeg, *mode): SceMpegAvcMode { int unknown; int pixelMode; } */
+static void hle_AvcDecodeMode(void) {
+    mpeg_ctx *c = ctx_of(psp_arg(0));
+    const uint32_t m = psp_arg(1);
+    if (!c || !psp_mem_ptr(m, 8)) { psp_ret(0xFFFFFFFFu); return; }
+    const int32_t mode = (int32_t)rd(m + 4);
+    if (mode >= 0 && mode <= 3) c->pixel_mode = mode;
+    psp_ret(0);
 }
 
 /* (mpeg, buffer, *offset) */
@@ -214,6 +425,10 @@ static void hle_UnRegistStream(void) { psp_ret(0); }
 static void hle_FlushAllStream(void) {
     mpeg_ctx *c = ctx_of(psp_arg(0));
     if (c) {
+#if MHFU_FFMPEG
+        engine_close(c);
+        c->failed = 0;
+#endif
         c->queued = 0;
         if (c->ring) { wr(c->ring + RB_READ, 0); wr(c->ring + RB_WRITEPOS, 0); }
         update_avail(c);
@@ -303,6 +518,12 @@ static void hle_RingbufferPut(void) {
         if (got <= 0) { if (!total && got < 0) total = got; break; }
         const int32_t added = got > n ? n : got;
         if (rd(ring + RB_READ) == 0 && !c->analyzed) analyze(c, data + (uint32_t)wpos * PACKET, NULL);
+#if MHFU_FFMPEG
+        if (!c->failed) {
+            const uint8_t *src = (const uint8_t *)psp_mem_ptr(data + (uint32_t)wpos * PACKET, (uint32_t)added * PACKET);
+            if (src) stream_append(c, src, (size_t)added * PACKET);
+        }
+#endif
         wr(ring + RB_READ, rd(ring + RB_READ) + (uint32_t)added);
         wr(ring + RB_WRITEPOS, rd(ring + RB_WRITEPOS) + (uint32_t)added);
         c->queued += (uint32_t)added * PACKET;
@@ -316,6 +537,11 @@ static void hle_RingbufferPut(void) {
 }
 
 static int has_data(mpeg_ctx *c) {
+#if MHFU_FFMPEG
+    /* The demuxer holds read-ahead of its own: at the end of the file the
+     * ringbuffer is empty with pictures still to come. */
+    if (engine_live(c) && !c->ended && all_put(c)) return 1;
+#endif
     return c->ring && rd(c->ring + RB_READ) != 0 && rd(c->ring + RB_AVAIL) != 0;
 }
 
@@ -366,6 +592,25 @@ static void hle_AvcDecode(void) {
     const uint32_t init = psp_arg(4);
     if (!c) { psp_ret(0xFFFFFFFFu); return; }
     if (!c->ring || rd(c->ring + RB_READ) == 0 || video_end(c)) { psp_ret(MPEG_ERROR_AVC_DECODE_FATAL); return; }
+#if MHFU_FFMPEG
+    if (engine_open(c)) {
+        const int got = engine_frame(c);
+        if (got > 0) {
+            const uint32_t at = psp_arg(3) ? rd(psp_arg(3)) : 0;
+            if (at) engine_write(c, at, psp_arg(2));
+            c->video_frame++;
+        }
+        update_avail(c);
+        if (init && psp_mem_ptr(init, 4)) wr(init, got > 0 ? 1 : 0);
+        psp_ret(0);
+        return;
+    }
+    if (!c->failed) {                  /* still buffering before the open */
+        if (init && psp_mem_ptr(init, 4)) wr(init, 0);
+        psp_ret(0);
+        return;
+    }
+#endif
     const uint32_t use = c->per_frame < c->queued ? c->per_frame : c->queued;
     c->queued -= use;
     c->video_frame++;
@@ -415,5 +660,6 @@ void mhfu_mpeg_register(void) {
     psp_hle_register(0xE1CE83A7, "sceMpeg", "sceMpegGetAtracAu", hle_GetAtracAu);
     psp_hle_register(0x0E3C2E9D, "sceMpeg", "sceMpegAvcDecode", hle_AvcDecode);
     psp_hle_register(0x740FCCD1, "sceMpeg", "sceMpegAvcDecodeStop", hle_AvcDecodeStop);
+    psp_hle_register(0xA11C7026, "sceMpeg", "sceMpegAvcDecodeMode", hle_AvcDecodeMode);
     psp_hle_register(0x800C44DF, "sceMpeg", "sceMpegAtracDecode", hle_AtracDecode);
 }
