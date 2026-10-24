@@ -33,9 +33,13 @@
 #include "psprecomp/hle.h"
 #include "psprecomp/vfpu.h"
 
+#include "adhoc.h"
+#include "atrac.h"
+#include "audio.h"
 #include "hle_mhfu.h"
 #include "input.h"
 #include "libfont.h"
+#include "lobby.h"
 #include "utility.h"
 #include "window.h"
 
@@ -177,6 +181,15 @@ static void report(void) {
     printf("VTimer handlers    %llu  virtual time %.2f s\n", (unsigned long long)mhfu_vtimer_fired(),
            psp_threadman_vtime_us() / 1e6);
     printf("thread switches    %llu\n", (unsigned long long)psp_threadman_switches());
+    /* Stack imbalances by site: a callee that returns with $sp moved is how a
+     * caller later reads its saved $ra from someone else's frame. */
+    psp_sp_site sites[24];
+    int nsites = psp_sp_call_hist(sites, 24);
+    if (nsites) printf("sp not restored by callee (site, delta, count):");
+    for (int i = 0; i < nsites; i++)
+        printf("%s %08X %+d x%llu", i % 4 == 0 ? "\n   " : "", sites[i].site, sites[i].delta,
+               (unsigned long long)sites[i].count);
+    if (nsites) printf("\n");
     /* The save manager (pointer at 0x09A44C60): +0x0C state (jump table at
      * 0x089321DC, run by 0x088BA870), +0x34 savedata result, +0x970 savedata
      * dialog active, +0x971 message dialog active, +0x978 memory stick inserted. */
@@ -254,6 +267,24 @@ static void on_miss(uint32_t addr) {
                " not recompiled yet (saved under %s/../overlays)\n", addr, slot, g_root);
     else
         printf("\ndispatch miss: nothing recompiled at 0x%08X\n", addr);
+    /* What is there now, and who jumped: a miss inside a recompiled overlay is
+     * either a function discovery did not find (code here) or a bad pointer
+     * (zeros, data, bss). */
+    printf("  ra 0x%08X, words at the target:", psp_cpu.r[PSP_REG_RA]);
+    for (uint32_t i = 0; i < 8; i++) printf(" %08X", psp_read32(addr + 4 * i));
+    printf("\n  registers:");
+    for (int i = 1; i < 32; i++) printf("%s r%d=%08X", i % 8 == 0 ? "\n            " : "", i, psp_cpu.r[i]);
+    /* A return to a bad address: where on the stack does the target sit? */
+    uint32_t sp = psp_cpu.r[PSP_REG_SP];
+    /* The recompiled call stack: each frame is a call still in progress, by
+     * the return address its caller expects. */
+    printf("\n  call stack (expected returns):");
+    int depth = 0;
+    for (const psp_frame *f = psp_cpu.frame; f && depth < 24; f = f->prev, depth++) printf(" %08X", f->ret);
+    printf("\n  stack slots holding the target (sp-256..sp+256):");
+    for (uint32_t a = sp - 256; a < sp + 256; a += 4)
+        if (psp_read32(a) == addr) printf(" 0x%08X(sp%+d)", a, (int)(a - sp));
+    printf("\n");
     report();
     exit(1);
 }
@@ -261,7 +292,9 @@ static void on_miss(uint32_t addr) {
 int main(int argc, char **argv) {
     if (argc < 3) {
         fprintf(stderr, "usage: %s <decrypted EBOOT> <root dir> [--iso FILE] [--budget N] [--seconds N]"
-                " [--window [SCALE]] [--press SCRIPT] [--snap N] [--name NAME]\n", argv[0]);
+                " [--window [SCALE]] [--press SCRIPT] [--snap N] [--name NAME]\n"
+                "       multiplayer: [--net-create | --net-join CODE] [--nick NAME] [--mac 02:..] [--relay HOST[:PORT]]\n",
+                argv[0]);
         return 2;
     }
     /* The runtime logs to stderr; unbuffered stdout keeps both in order in
@@ -271,15 +304,21 @@ int main(int argc, char **argv) {
     const char *eboot = argv[1];
     g_root = argv[2];
     const char *iso = NULL, *press = NULL, *name = NULL;
+    const char *nick = NULL, *mac = NULL, *relay = NULL, *net_join = NULL;
     unsigned long long budget = DEFAULT_BUDGET;
-    int window = 0, snap = 0;
+    int window = 0, snap = 0, net_create = 0;
     for (int i = 3; i < argc; i++) {
         int more = i + 1 < argc;
         if (!strcmp(argv[i], "--window")) {
             window = 2;
             if (more && argv[i + 1][0] >= '1' && argv[i + 1][0] <= '9') window = atoi(argv[++i]);
         }
+        else if (!strcmp(argv[i], "--net-create")) net_create = 1;
         else if (!more) break;
+        else if (!strcmp(argv[i], "--net-join")) net_join = argv[++i];
+        else if (!strcmp(argv[i], "--nick"))     nick = argv[++i];
+        else if (!strcmp(argv[i], "--mac"))      mac = argv[++i];
+        else if (!strcmp(argv[i], "--relay"))    relay = argv[++i];
         else if (!strcmp(argv[i], "--iso"))     iso = argv[++i];
         else if (!strcmp(argv[i], "--budget"))  budget = strtoull(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--seconds")) g_seconds = atoi(argv[++i]);
@@ -300,6 +339,7 @@ int main(int argc, char **argv) {
     char ovl_dir[600];
     snprintf(ovl_dir, sizeof ovl_dir, "%s/../overlays", g_root);
     mhfu_hle_register(ovl_dir);
+    mhfu_atrac_register();
     char font_dir[600];
     snprintf(font_dir, sizeof font_dir, "%s/flash0/font", g_root);
     mhfu_libfont_register(font_dir);
@@ -307,6 +347,17 @@ int main(int argc, char **argv) {
     snprintf(ms_dir, sizeof ms_dir, "%s/ms", g_root);
     mhfu_utility_register(ms_dir);
     mhfu_utility_set_osk_text(name);
+    /* Multiplayer: the room the game's ad hoc play goes through. The window's
+     * Multiplayer menu does the same as these two options. */
+    mhfu_lobby_init(g_root, nick, mac, relay);
+    mhfu_adhoc_register();
+    if (net_create || net_join) {
+        char err[256], status[128];
+        if ((net_create ? mhfu_lobby_create(err, sizeof err) : mhfu_lobby_join(net_join, err, sizeof err)) != 0)
+            printf("net: %s\n", err);
+        mhfu_lobby_status(status, sizeof status);
+        printf("net: %s\n", status);
+    }
     char snap_dir[600];
     snprintf(snap_dir, sizeof snap_dir, "%s/frames", g_root);
     if (mhfu_input_init(press, snap, snap_dir) != 0) return 2;
@@ -356,9 +407,20 @@ int main(int argc, char **argv) {
         mhfu_window_on_close(on_window_closed);
         if (mhfu_window_start(window) == 0) mhfu_input_set_pacing(1);
         else fprintf(stderr, "no window (only on Windows); running without one\n");
+        /* Sound only with a window: scripted runs without one stay quiet. */
+        if (mhfu_audio_start() != 0) fprintf(stderr, "no audio output; running silent\n");
     }
 
     printf("running from 0x%08X (budget %llu calls, %d s)\n\n", img.entry, budget, g_seconds);
+    /* MHFU_WATCH=0x09A12340: log every write to that address and who made it
+     * (psprecomp's write watch), to find what corrupts a value. */
+    /* MHFU_WATCH_VALUE=0x09D63810 as well: only writes that leave that value. */
+    if (getenv("MHFU_WATCH")) {
+        uint32_t at = (uint32_t)strtoul(getenv("MHFU_WATCH"), NULL, 0);
+        if (getenv("MHFU_WATCH_VALUE"))
+            psp_mem_watch_write_value(at, (uint32_t)strtoul(getenv("MHFU_WATCH_VALUE"), NULL, 0));
+        else psp_mem_watch_write(at);
+    }
     start_watchdog();
     psp_call_from_host(img.entry);
     printf("\nentry returned, v0 = 0x%08X; running the threads it started\n",
