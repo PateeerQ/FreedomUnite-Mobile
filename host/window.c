@@ -36,6 +36,29 @@ static void        (*g_on_close)(void);
 static int           g_scale = 2;
 static uint32_t      g_pixels[PSP_W * PSP_H];
 
+/* The FPS overlay (F3): frames the game showed per second, and the average
+ * and worst frametime, over the last half second. */
+static int    g_show_fps = 1;
+static char   g_fps_text[96] = "FPS --";
+static void update_fps(void) {
+    static uint64_t last_flips;
+    static ULONGLONG last_ms;
+    uint64_t flips, max_us;
+    const ULONGLONG now = GetTickCount64();
+    psp_display_frame_stats(&flips, &max_us);
+    if (last_ms && now > last_ms) {
+        const double dt = (double)(now - last_ms) / 1000.0;
+        const double n = (double)(flips - last_flips);
+        if (n > 0)
+            snprintf(g_fps_text, sizeof g_fps_text, "FPS %.1f   %.1f ms (worst %.1f ms)",
+                     n / dt, dt * 1000.0 / n, (double)max_us / 1000.0);
+        else
+            snprintf(g_fps_text, sizeof g_fps_text, "FPS 0   (no frame for %.1f s)", dt);
+    }
+    last_flips = flips;
+    last_ms = now;
+}
+
 static uint32_t key_button(WPARAM k) {
     switch (k) {
     case VK_UP:    return PSP_CTRL_UP;
@@ -213,6 +236,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_KEYDOWN: case WM_SYSKEYDOWN:
+        if (wp == VK_F3 && !(lp & (1 << 30))) { g_show_fps = !g_show_fps; return 0; }
         InterlockedOr(&g_buttons, (LONG)key_button(wp));
         InterlockedOr(&g_stick, key_stick(wp));
         return 0;
@@ -226,6 +250,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_TIMER:
         if (wp == 2) { if (!g_lobby_busy) update_title(); return 0; }
+        if (wp == 3) { update_fps(); return 0; }
         InvalidateRect(h, NULL, FALSE);
         return 0;
     case WM_PAINT: {
@@ -245,6 +270,17 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         SetStretchBltMode(dc, COLORONCOLOR);
         StretchDIBits(dc, 0, 0, r.right, r.bottom, 0, 0, PSP_W, PSP_H,
                       g_pixels, &bi, DIB_RGB_COLORS, SRCCOPY);
+        if (g_show_fps) {
+            HFONT old = (HFONT)SelectObject(dc, GetStockObject(ANSI_FIXED_FONT));
+            SIZE sz;
+            GetTextExtentPoint32A(dc, g_fps_text, (int)strlen(g_fps_text), &sz);
+            RECT box = { 4, 4, 4 + sz.cx + 8, 4 + sz.cy + 4 };
+            FillRect(dc, &box, (HBRUSH)GetStockObject(BLACK_BRUSH));
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, RGB(80, 255, 80));
+            TextOutA(dc, 8, 6, g_fps_text, (int)strlen(g_fps_text));
+            SelectObject(dc, old);
+        }
         EndPaint(h, &ps);
         return 0;
     }
@@ -280,6 +316,7 @@ static DWORD WINAPI window_thread(LPVOID arg) {
     ShowWindow(h, SW_SHOW);
     SetTimer(h, 1, 16, NULL);
     SetTimer(h, 2, 2000, NULL);      /* the title's player count */
+    SetTimer(h, 3, 500, NULL);       /* the FPS overlay */
     update_title();
 
     MSG m;
