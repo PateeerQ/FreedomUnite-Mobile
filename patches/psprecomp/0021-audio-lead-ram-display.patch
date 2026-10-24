@@ -1,0 +1,44 @@
+diff --git a/src/hle/misc.c b/src/hle/misc.c
+index f7cb129..f38c7d3 100644
+--- a/src/hle/misc.c
++++ b/src/hle/misc.c
+@@ -231,6 +231,13 @@ static uint64_t host_now_us(void) {
+     return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+ }
+ static uint64_t g_audio_due_us[AUDIO_CHANNELS];
++/* How far ahead of real time a channel may queue before a blocking output
++ * waits. One buffer was not enough: on one cooperative CPU the audio thread
++ * can be held up for a whole game frame, and the host's output then ran dry
++ * -- MHFU's sound effects stuttered, a few gaps of 256-512 samples every ten
++ * seconds. 35 ms covers a 30 fps frame; more is heard as the sound lagging
++ * the picture. */
++#define AUDIO_LEAD_US 35000u
+ #endif
+ 
+ static void output_blocking(int panned) {
+@@ -246,7 +253,8 @@ static void output_blocking(int panned) {
+         uint64_t now = host_now_us();
+         if (g_audio_due_us[ch] < now) g_audio_due_us[ch] = now;   /* underrun */
+         g_audio_due_us[ch] += play_us;
+-        while (host_now_us() + play_us < g_audio_due_us[ch]) psp_threadman_yield();
++        const uint64_t lead = play_us > AUDIO_LEAD_US ? play_us : AUDIO_LEAD_US;
++        while (host_now_us() + lead < g_audio_due_us[ch]) psp_threadman_yield();
+     }
+ #else
+     psp_threadman_delay(play_us);
+diff --git a/src/render_gl.c b/src/render_gl.c
+index 0c4b66d..e539f5c 100644
+--- a/src/render_gl.c
++++ b/src/render_gl.c
+@@ -669,7 +669,10 @@ static void gl_present(void) {
+     if (!g_started) return;
+     uint32_t addr, stride, fmt;
+     psp_display_get(&addr, &stride, &fmt);
+-    addr = 0x04000000u | (addr & 0x001FFFFFu);
++    /* VRAM addresses fold their mirrors together; a framebuffer in main RAM
++     * (MHFU's movies show the decoder's output straight from RAM) is left as
++     * it is, and is never an FBO, so it is shown from memory. */
++    if ((addr & 0x0F000000u) == 0x04000000u) addr = 0x04000000u | (addr & 0x001FFFFFu);
+     c_present *c = (c_present *)cmd_add(C_PRESENT, sizeof *c);
+     gfb *f = fb_find(addr);
+     if (f && f->drawn) {
