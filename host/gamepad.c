@@ -7,6 +7,7 @@
 
 #include <SDL3/SDL.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 static SDL_AtomicInt g_buttons;
 static SDL_AtomicInt g_stick;        /* x | y << 8, or -1 while the stick is centred */
@@ -83,6 +84,9 @@ static int SDLCALL pad_thread(void *arg) {
 
 int mhfu_gamepad_start(void) {
     SDL_SetAtomicInt(&g_stick, -1);
+    /* MHFU_NO_GAMEPAD=1: scripted runs, which a controller lying on the desk
+     * should not steer. */
+    if (getenv("MHFU_NO_GAMEPAD")) return 0;
     SDL_Thread *t = SDL_CreateThread(pad_thread, "gamepad", NULL);
     if (!t) return -1;
     SDL_DetachThread(t);
