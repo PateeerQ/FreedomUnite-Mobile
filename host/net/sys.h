@@ -1,0 +1,67 @@
+/* MHFU-Android -- sockets, threads and a clock for the network code, on
+ * Windows (Winsock) and POSIX (Linux, Android). Nothing here knows about the
+ * PSP; hub.c, client.c and the standalone hub all build on it. */
+#ifndef MHFU_NET_SYS_H
+#define MHFU_NET_SYS_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+typedef SOCKET net_sock;
+#define NET_BAD_SOCK INVALID_SOCKET
+#else
+typedef int net_sock;
+#define NET_BAD_SOCK (-1)
+#endif
+
+/* Winsock wants starting once; harmless to call more than once. */
+int  net_sys_init(void);
+
+/* A TCP listener on every interface. `port` 0 picks one; the chosen port is
+ * written back. */
+net_sock net_tcp_listen(uint16_t *port);
+/* Connect to host:port (a name or a dotted address), giving up after
+ * `timeout_ms`. */
+net_sock net_tcp_connect(const char *host, uint16_t port, int timeout_ms);
+net_sock net_tcp_accept(net_sock s, char *peer, size_t peer_cap);
+/* A UDP socket bound to `port` on every interface, broadcast allowed. */
+net_sock net_udp_bind(uint16_t port);
+int  net_udp_broadcast(net_sock s, uint16_t port, const void *buf, int len);
+int  net_udp_recvfrom(net_sock s, void *buf, int cap, uint32_t *ip, uint16_t *port);
+int  net_udp_sendto(net_sock s, uint32_t ip, uint16_t port, const void *buf, int len);
+
+int  net_send_all(net_sock s, const void *buf, size_t len);
+/* > 0 bytes read, 0 the peer closed, < 0 an error. */
+int  net_recv(net_sock s, void *buf, size_t cap);
+void net_close(net_sock s);
+void net_set_nodelay(net_sock s);
+
+/* Wait until one of `socks` is readable or `timeout_ms` passes. Returns a
+ * bit per socket (n <= 32), 0 on timeout, -1 on error. */
+int  net_wait_readable(const net_sock *socks, int n, int timeout_ms);
+
+/* Dotted IPv4 of `ip` (host byte order). */
+void net_ip_str(uint32_t ip, char *out, size_t cap);
+
+/* ---- threads ---- */
+typedef struct net_mutex net_mutex;
+net_mutex *net_mutex_new(void);
+void net_mutex_free(net_mutex *m);
+void net_lock(net_mutex *m);
+void net_unlock(net_mutex *m);
+
+typedef void (*net_thread_fn)(void *arg);
+/* A detached thread; 0 if it started. */
+int  net_thread_start(net_thread_fn fn, void *arg);
+void net_sleep_ms(int ms);
+
+/* Monotonic milliseconds. */
+uint64_t net_now_ms(void);
+
+/* `n` bytes from the system's random source (falls back to the clock). */
+void net_random(void *out, size_t n);
+
+#endif
