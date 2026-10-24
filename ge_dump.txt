@@ -1,22 +1,58 @@
-=== run list 525187 at 0x08A8C5A8 (lists 900)
-  flow J 0x08A8C5AC -> 0x08A8C5B0
-  flow J 0x08A8C5B4 -> 0x08ACC698
-  flow J 0x08ACC6E0 -> 0x08ACC824
-  flow J 0x08ACC8A0 -> 0x08A8C5B8
-  flow J 0x08A8C5BC -> 0x08ACC6E4
-  flow J 0x08ACC6F8 -> 0x08ACC760
-  flow J 0x08ACC78C -> 0x08ACC7A8
-=== list 900
+=== run list 527720 at 0x0899CD64 (lists 3433)
+=== list 3433
   world 0 0 0 0 1 0 0 0 1 0 0 0
   view  1 0 0 0 1 0 0 0 1 0 0 0
   proj  1.21591 0 0 0 0 2.14569 0 0 0 0 -1 -1 0 0 -60 0
   vp scale 0 0 0 pos 0 0 0 off 1808 1912 uv 1 1 0 0
-  from: world 0x0899CE30 view 0x08ACC854 proj 0x08ACC898 yscale 0x08ACC69C offy 0x08ACC6C4
-  sprites x2 vtype 800116 vaddr 08ACC790 fb 00000000/512 blend through z1/5/1 tex 1 091BF390 fmt 5 512x512 fn 0 uvmode 0
-  texture 0x091BF390 fmt 5 512x512 bw 480 swz 1 clut fmt 3 shift 0 mask FF start 0 cbp 0x091DF1A0 -> ge_tex_091BF390_f5.ppm
-    v0 clip (0 0 0 1) -> 0 0 z 61440 w 0 uv 0 0 c FFFFFFFF fog 1
-    v1 clip (0 0 0 1) -> 480 272 z 61440 w 0 uv 480 272 c FFFFFFFF fog 1
-  flow J 0x08ACC7C8 -> 0x08A8C5C0
+  from: world 0x0899CE30 view 0x08ACC7E8 proj 0x08ACC82C yscale 0x08ACC69C offy 0x08ACC6C4
+  sprites x2 vtype 800114 vaddr 0899CD24 fb 00044000/512 CLEAR blend through z1/5/1 tex 0 0922FE50 fmt 5 512x512 fn 0 uvmode 0
+    v0 clip (0 0 0 1) -> 0 0 z 65535 w 0 uv 0 0 c 00000000 fog 1
+    v1 clip (0 0 0 1) -> 480 272 z 65535 w 0 uv 0 0 c 00000000 fog 1
+=== run list 527721 at 0x08A8C508 (lists 3434)
+  flow J 0x08A8C50C -> 0x08A8C510
+  flow J 0x08A8C514 -> 0x08A8C698
+  flow J 0x08A8C6E0 -> 0x08A8C7B8
+  flow J 0x08A8C834 -> 0x08A8C518
+  flow J 0x08A8C51C -> 0x08A8C6E4
+  flow J 0x08A8C6F8 -> 0x08A8C520
+  flow J 0x08A8C524 -> 0x08A8C528
+  flow J 0x08A8C52C -> 0x08A8C530
+  flow J 0x08A8C534 -> 0x08A8C6FC
+  flow J 0x08A8C70C -> 0x08A8C538
+  flow J 0x08A8C53C -> 0x08A8C710
+  flow J 0x08A8C724 -> 0x08A8C540
+  flow J 0x08A8C544 -> 0x08A8C548
+  flow J 0x08A8C54C -> 0x08A8C550
+  flow J 0x08A8C554 -> 0x08A8C558
+  flow J 0x08A8C55C -> 0x08A8C560
+  flow J 0x08A8C564 -> 0x08A8C568
+  flow J 0x08A8C56C -> 0x08A8C570
+  flow J 0x08A8C574 -> 0x08A8C578
+  flow J 0x08A8C57C -> 0x08A8C580
+  flow J 0x08A8C584 -> 0x08A8C588
+  flow J 0x08A8C58C -> 0x08A8C590
+  flow J 0x08A8C594 -> 0x08A8C760
+  flow J 0x08A8C77C -> 0x08A8C798
+=== list 3434
+  sprites x2 vtype 80011C vaddr 08A8C780 fb 00044000/512 blend through z0/0/1 tex 0 0922FE50 fmt 5 512x512 fn 0 uvmode 0
+    v0 clip (0 0 0 1) -> 0 0 z 0 w 0 uv 0 0 c FF000000 fog 1
+    v1 clip (0 0 0 1) -> 480 272 z 0 w 0 uv 0 0 c FF000000 fog 1
+  flow J 0x08A8C7B4 -> 0x08A8C598
+  flow J 0x08A8C59C -> 0x08A8C728
+  flow J 0x08A8C75C -> 0x08A8C5A0
+  flow J 0x08A8C5A4 -> 0x0899D108
+=== run list 527722 at 0x0899CD34 (lists 3435)
+=== list 3435
+  sprites x2 vtype 800114 vaddr 0899CD24 fb 00000000/512 CLEAR blend through z1/5/1 tex 0 0922FE50 fmt 5 512x512 fn 0 uvmode 0
+    v0 clip (0 0 0 1) -> 0 0 z 65535 w 0 uv 0 0 c 00000000 fog 1
+    v1 clip (0 0 0 1) -> 480 272 z 65535 w 0 uv 0 0 c 00000000 fog 1
+=== run list 527723 at 0x08A8C5A8 (lists 3436)
+  flow J 0x08A8C5AC -> 0x08A8C5B0
+  flow J 0x08A8C5B4 -> 0x08ACC698
+  flow J 0x08ACC6E0 -> 0x08ACC7B8
+  flow J 0x08ACC834 -> 0x08A8C5B8
+  flow J 0x08A8C5BC -> 0x08ACC6E4
+  flow J 0x08ACC6F8 -> 0x08A8C5C0
   flow J 0x08A8C5C4 -> 0x08A8C5C8
   flow J 0x08A8C5CC -> 0x08A8C5D0
   flow J 0x08A8C5D4 -> 0x08ACC6FC
@@ -33,17 +69,13 @@
   flow J 0x08A8C61C -> 0x08A8C620
   flow J 0x08A8C624 -> 0x08A8C628
   flow J 0x08A8C62C -> 0x08A8C630
-  flow J 0x08A8C634 -> 0x08ACC7CC
-  flow J 0x08ACC7E8 -> 0x08ACC804
-  sprites x2 vtype 80011C vaddr 08ACC7EC fb 00000000/512 blend through z0/0/1 tex 0 091BF390 fmt 5 512x512 fn 0 uvmode 0
-    v0 clip (0 0 0 1) -> 0 0 z 0 w 0 uv 0 0 c 3F000000 fog 1
-    v1 clip (0 0 0 1) -> 480 272 z 0 w 0 uv 0 0 c 3F000000 fog 1
-  flow J 0x08ACC820 -> 0x08A8C638
+  flow J 0x08A8C634 -> 0x08ACC760
+  flow J 0x08ACC77C -> 0x08ACC798
+=== list 3436
+  sprites x2 vtype 80011C vaddr 08ACC780 fb 00000000/512 blend through z0/0/1 tex 0 0922FE50 fmt 5 512x512 fn 0 uvmode 0
+    v0 clip (0 0 0 1) -> 0 0 z 0 w 0 uv 0 0 c FF000000 fog 1
+    v1 clip (0 0 0 1) -> 480 272 z 0 w 0 uv 0 0 c FF000000 fog 1
+  flow J 0x08ACC7B4 -> 0x08A8C638
   flow J 0x08A8C63C -> 0x08ACC728
   flow J 0x08ACC75C -> 0x08A8C640
   flow J 0x08A8C644 -> 0x0899D108
-=== run list 525188 at 0x0899CD64 (lists 901)
-=== list 901
-  sprites x2 vtype 800114 vaddr 0899CD24 fb 00044000/512 CLEAR blend through z1/5/1 tex 0 091BF390 fmt 5 512x512 fn 0 uvmode 0
-    v0 clip (0 0 0 1) -> 0 0 z 65535 w 0 uv 0 0 c 00000000 fog 1
-    v1 clip (0 0 0 1) -> 480 272 z 65535 w 0 uv 0 0 c 00000000 fog 1
