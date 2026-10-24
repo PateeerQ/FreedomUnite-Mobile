@@ -39,9 +39,11 @@ int  net_recv(net_sock s, void *buf, size_t cap);
 void net_close(net_sock s);
 void net_set_nodelay(net_sock s);
 
-/* Wait until one of `socks` is readable or `timeout_ms` passes. Returns a
- * bit per socket (n <= 32), 0 on timeout, -1 on error. */
-int  net_wait_readable(const net_sock *socks, int n, int timeout_ms);
+/* Wait until any of `socks` (up to NET_POLL_MAX) is readable, closed or in
+ * error, or `timeout_ms` passes. ready[i] is set for each that is. Returns how
+ * many, 0 on timeout, -1 on error. NET_BAD_SOCK entries are skipped. */
+#define NET_POLL_MAX 512
+int  net_poll(const net_sock *socks, int n, uint8_t *ready, int timeout_ms);
 
 /* Dotted IPv4 of `ip` (host byte order). */
 void net_ip_str(uint32_t ip, char *out, size_t cap);

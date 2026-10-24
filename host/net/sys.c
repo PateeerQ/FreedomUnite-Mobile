@@ -2,6 +2,8 @@
 #ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
+#else
+#define FD_SETSIZE 1024     /* Winsock's select defaults to 64 sockets */
 #endif
 #include "sys.h"
 
@@ -186,25 +188,31 @@ int net_recv(net_sock s, void *buf, size_t cap) {
     return (int)recv(s, (char *)buf, (int)cap, 0);
 }
 
-int net_wait_readable(const net_sock *socks, int n, int timeout_ms) {
+int net_poll(const net_sock *socks, int n, uint8_t *ready, int timeout_ms) {
+    if (n > NET_POLL_MAX) n = NET_POLL_MAX;
+    memset(ready, 0, (size_t)n);
 #ifdef _WIN32
     fd_set r;
     FD_ZERO(&r);
-    for (int i = 0; i < n; i++) if (socks[i] != NET_BAD_SOCK) FD_SET(socks[i], &r);
+    int any = 0;
+    for (int i = 0; i < n; i++) if (socks[i] != NET_BAD_SOCK) { FD_SET(socks[i], &r); any = 1; }
+    if (!any) { Sleep((DWORD)timeout_ms); return 0; }
     struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
     int k = select(0, &r, NULL, NULL, &tv);
     if (k <= 0) return k;
-    int bits = 0;
-    for (int i = 0; i < n; i++) if (socks[i] != NET_BAD_SOCK && FD_ISSET(socks[i], &r)) bits |= 1 << i;
-    return bits;
+    int cnt = 0;
+    for (int i = 0; i < n; i++)
+        if (socks[i] != NET_BAD_SOCK && FD_ISSET(socks[i], &r)) { ready[i] = 1; cnt++; }
+    return cnt;
 #else
-    struct pollfd p[32];
+    struct pollfd p[NET_POLL_MAX];
     for (int i = 0; i < n; i++) { p[i].fd = socks[i]; p[i].events = POLLIN; p[i].revents = 0; }
     int k = poll(p, (nfds_t)n, timeout_ms);
     if (k <= 0) return k;
-    int bits = 0;
-    for (int i = 0; i < n; i++) if (p[i].revents & (POLLIN | POLLHUP | POLLERR)) bits |= 1 << i;
-    return bits;
+    int cnt = 0;
+    for (int i = 0; i < n; i++)
+        if (socks[i] != NET_BAD_SOCK && (p[i].revents & (POLLIN | POLLHUP | POLLERR))) { ready[i] = 1; cnt++; }
+    return cnt;
 #endif
 }
 
