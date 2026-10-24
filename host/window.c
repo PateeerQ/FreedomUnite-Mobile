@@ -6,7 +6,10 @@
  *
  * Keys (as PPSSPP's defaults): arrows = D-pad, X = Cross, S = Circle,
  * Z = Square, A = Triangle, Q = L, W = R, Space or Enter = Start,
- * V or Backspace = Select, I/J/K/L = analog stick. */
+ * V or Backspace = Select, I/J/K/L = analog stick.
+ *
+ * The Multiplayer menu is "Create Server" / "Join Server" (lobby.h): the
+ * room's code and player count show in the title bar. */
 #include "window.h"
 
 #ifdef _WIN32
@@ -15,7 +18,9 @@
 #include "psprecomp/mem.h"
 #include "psprecomp/render.h"
 #include "input.h"
+#include "lobby.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #define WIN32_LEAN_AND_MEAN
@@ -79,8 +84,134 @@ static void grab(void) {
     }
 }
 
+/* ---- the Multiplayer menu ---- */
+
+enum { ID_CREATE = 100, ID_JOIN, ID_LEAVE, ID_CODE_EDIT, ID_CODE_OK, ID_CODE_CANCEL };
+#define WM_LOBBY_DONE (WM_APP + 1)
+
+static HWND          g_main;
+static volatile LONG g_lobby_busy;
+static char          g_lobby_err[256];
+static char          g_join_code[16];
+
+/* Create and join can take a few seconds (finding the room on the LAN), so
+ * they run on a thread of their own and post back when done. */
+static DWORD WINAPI lobby_worker(LPVOID arg) {
+    int create = (int)(INT_PTR)arg;
+    g_lobby_err[0] = 0;
+    int r = create ? mhfu_lobby_create(g_lobby_err, sizeof g_lobby_err)
+                   : mhfu_lobby_join(g_join_code, g_lobby_err, sizeof g_lobby_err);
+    PostMessageA(g_main, WM_LOBBY_DONE, (WPARAM)r, (LPARAM)create);
+    return 0;
+}
+
+static void lobby_start(int create) {
+    if (InterlockedExchange(&g_lobby_busy, 1)) return;
+    SetWindowTextA(g_main, create ? "MHFU - creating a room..." : "MHFU - looking for the room...");
+    HANDLE t = CreateThread(NULL, 0, lobby_worker, (LPVOID)(INT_PTR)create, 0, NULL);
+    if (t) CloseHandle(t);
+    else InterlockedExchange(&g_lobby_busy, 0);
+}
+
+static void update_title(void) {
+    char status[128], title[200];
+    mhfu_lobby_status(status, sizeof status);
+    snprintf(title, sizeof title, "MHFU (recompiled) - %s", status);
+    SetWindowTextA(g_main, title);
+}
+
+/* The room code prompt: a small window with an edit box. */
+static LRESULT CALLBACK code_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_CREATE: {
+        HFONT font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+        HWND l = CreateWindowA("STATIC", "Room code (e.g. MH-4K7Q):", WS_CHILD | WS_VISIBLE,
+                               12, 12, 260, 18, h, NULL, NULL, NULL);
+        HWND e = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_UPPERCASE,
+                                 12, 34, 260, 24, h, (HMENU)ID_CODE_EDIT, NULL, NULL);
+        HWND ok = CreateWindowA("BUTTON", "Join", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                                110, 68, 78, 26, h, (HMENU)ID_CODE_OK, NULL, NULL);
+        HWND cancel = CreateWindowA("BUTTON", "Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                    194, 68, 78, 26, h, (HMENU)ID_CODE_CANCEL, NULL, NULL);
+        SendMessageA(l, WM_SETFONT, (WPARAM)font, TRUE);
+        SendMessageA(e, WM_SETFONT, (WPARAM)font, TRUE);
+        SendMessageA(ok, WM_SETFONT, (WPARAM)font, TRUE);
+        SendMessageA(cancel, WM_SETFONT, (WPARAM)font, TRUE);
+        SendMessageA(e, EM_SETLIMITTEXT, 9, 0);
+        SetFocus(e);
+        return 0;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wp) == ID_CODE_OK || LOWORD(wp) == IDOK) {
+            GetDlgItemTextA(h, ID_CODE_EDIT, g_join_code, sizeof g_join_code);
+            DestroyWindow(h);
+            lobby_start(0);
+        } else if (LOWORD(wp) == ID_CODE_CANCEL || LOWORD(wp) == IDCANCEL) {
+            DestroyWindow(h);
+        }
+        return 0;
+    case WM_DESTROY:
+        EnableWindow(g_main, TRUE);
+        SetForegroundWindow(g_main);
+        return 0;
+    }
+    return DefWindowProcA(h, msg, wp, lp);
+}
+
+static void ask_code(void) {
+    static int registered;
+    if (!registered) {
+        WNDCLASSA wc;
+        memset(&wc, 0, sizeof wc);
+        wc.lpfnWndProc = code_proc;
+        wc.hInstance = GetModuleHandleA(NULL);
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.lpszClassName = "mhfu_code";
+        RegisterClassA(&wc);
+        registered = 1;
+    }
+    RECT r;
+    GetWindowRect(g_main, &r);
+    HWND d = CreateWindowExA(WS_EX_DLGMODALFRAME, "mhfu_code", "Join Server",
+                             WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+                             r.left + 60, r.top + 80, 300, 140, g_main, NULL, GetModuleHandleA(NULL), NULL);
+    if (d) EnableWindow(g_main, FALSE);
+}
+
+static HMENU make_menu(void) {
+    HMENU bar = CreateMenu(), mp = CreatePopupMenu();
+    AppendMenuA(mp, MF_STRING, ID_CREATE, "&Create Server");
+    AppendMenuA(mp, MF_STRING, ID_JOIN, "&Join Server...");
+    AppendMenuA(mp, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(mp, MF_STRING, ID_LEAVE, "&Leave Server");
+    AppendMenuA(bar, MF_POPUP, (UINT_PTR)mp, "&Multiplayer");
+    return bar;
+}
+
 static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
+    case WM_COMMAND:
+        switch (LOWORD(wp)) {
+        case ID_CREATE: lobby_start(1); break;
+        case ID_JOIN:   if (!g_lobby_busy) ask_code(); break;
+        case ID_LEAVE:  mhfu_lobby_leave(); update_title(); break;
+        }
+        return 0;
+    case WM_LOBBY_DONE: {
+        InterlockedExchange(&g_lobby_busy, 0);
+        update_title();
+        if ((int)wp != 0) MessageBoxA(h, g_lobby_err, "Multiplayer", MB_OK | MB_ICONWARNING);
+        else if ((int)lp) {
+            char code[8], text[200];
+            mhfu_lobby_code(code);
+            snprintf(text, sizeof text,
+                     "Room %s is open.\n\nOther players choose Join Server and enter %s.\n"
+                     "Then go to the Gathering Hall as usual.", code, code);
+            MessageBoxA(h, text, "Multiplayer", MB_OK | MB_ICONINFORMATION);
+        }
+        return 0;
+    }
     case WM_KEYDOWN: case WM_SYSKEYDOWN:
         InterlockedOr(&g_buttons, (LONG)key_button(wp));
         InterlockedOr(&g_stick, key_stick(wp));
@@ -94,6 +225,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         InterlockedExchange(&g_stick, 0);
         return 0;
     case WM_TIMER:
+        if (wp == 2) { if (!g_lobby_busy) update_title(); return 0; }
         InvalidateRect(h, NULL, FALSE);
         return 0;
     case WM_PAINT: {
@@ -138,16 +270,23 @@ static DWORD WINAPI window_thread(LPVOID arg) {
 
     RECT r = { 0, 0, PSP_W * g_scale, PSP_H * g_scale };
     DWORD style = WS_OVERLAPPEDWINDOW;
-    AdjustWindowRect(&r, style, FALSE);
+    HMENU menu = make_menu();
+    AdjustWindowRect(&r, style, TRUE);
     HWND h = CreateWindowA("mhfu_host", "MHFU (recompiled)", style, CW_USEDEFAULT, CW_USEDEFAULT,
-                           r.right - r.left, r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
+                           r.right - r.left, r.bottom - r.top, NULL, menu, wc.hInstance, NULL);
+    g_main = h;
     SetEvent(ready);
     if (!h) { InterlockedExchange(&g_closed, 1); return 1; }
     ShowWindow(h, SW_SHOW);
     SetTimer(h, 1, 16, NULL);
+    SetTimer(h, 2, 2000, NULL);      /* the title's player count */
+    update_title();
 
     MSG m;
     while (GetMessageA(&m, NULL, 0, 0) > 0) {
+        /* Enter and Escape in the room code box. */
+        HWND top = GetAncestor(m.hwnd, GA_ROOT);
+        if (top && top != h && IsDialogMessageA(top, &m)) continue;
         TranslateMessage(&m);
         DispatchMessageA(&m);
     }
