@@ -25,6 +25,12 @@
 
 #define HOLD_FRAMES 6
 #define DUMP_BIT    0x80000000u
+/* Not buttons either: the analog stick pushed all the way. */
+#define STICK_UP    0x40000000u
+#define STICK_DOWN  0x20000000u
+#define STICK_LEFT  0x10000000u
+#define STICK_RIGHT 0x08000000u
+#define STICK_BITS  (STICK_UP | STICK_DOWN | STICK_LEFT | STICK_RIGHT)
 #define MAX_PRESSES 256
 
 typedef struct { uint64_t from, to; uint32_t buttons; } press;
@@ -69,6 +75,8 @@ static const struct { const char *name; uint32_t bit; } k_names[] = {
     /* Not a button: dumps the next two display lists (one frame) to
      * ge_dump.txt, for "what is drawn at this point". */
     { "DUMP", DUMP_BIT },
+    { "STICK_UP", STICK_UP }, { "STICK_DOWN", STICK_DOWN },
+    { "STICK_LEFT", STICK_LEFT }, { "STICK_RIGHT", STICK_RIGHT },
 };
 
 static int parse_buttons(const char *s, size_t n, uint32_t *out) {
@@ -134,6 +142,13 @@ static void hle_ReadBufferPositive(void) {
     if (buttons & DUMP_BIT) {
         if (!(script_buttons(frame - 1) & DUMP_BIT)) psp_ge_dump_next(2);   /* once per press */
         buttons &= ~DUMP_BIT;
+    }
+    if (buttons & STICK_BITS) {
+        if (buttons & STICK_LEFT)  ax = 0;
+        if (buttons & STICK_RIGHT) ax = 255;
+        if (buttons & STICK_UP)    ay = 0;
+        if (buttons & STICK_DOWN)  ay = 255;
+        buttons &= ~STICK_BITS;
     }
     uint32_t stamp = (uint32_t)psp_threadman_vtime_us();
 
