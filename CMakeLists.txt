@@ -87,6 +87,53 @@ if(WIN32)
     target_link_libraries(mhfu_host PRIVATE user32 gdi32 opengl32)
 endif()
 
+# Gamepads (host/gamepad.c): SDL3, built static from source, with only what
+# reading a controller needs. SDL reads the DualSense and DualShock 4 itself,
+# over USB or Bluetooth, which XInput cannot. The Android port will use SDL3
+# for its window and input as well. MHFU_GAMEPAD=OFF builds without it.
+option(MHFU_GAMEPAD "Controller support through SDL3" ON)
+if(MHFU_GAMEPAD)
+    include(FetchContent)
+    set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+    set(SDL_STATIC ON CACHE BOOL "" FORCE)
+    set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+    set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(SDL_AUDIO OFF CACHE BOOL "" FORCE)
+    set(SDL_RENDER OFF CACHE BOOL "" FORCE)
+    set(SDL_GPU OFF CACHE BOOL "" FORCE)
+    set(SDL_CAMERA OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(SDL3
+        GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
+        GIT_TAG        release-3.2.26
+        GIT_SHALLOW    TRUE)
+    FetchContent_MakeAvailable(SDL3)
+    target_sources(mhfu_host PRIVATE host/gamepad.c)
+    target_link_libraries(mhfu_host PRIVATE SDL3::SDL3-static)
+    target_compile_definitions(mhfu_host PRIVATE MHFU_GAMEPAD=1)
+endif()
+
+# Movies and music (host/mpeg.c, host/atrac.c): FFmpeg's H.264 and ATRAC3+
+# decoders, from a shared LGPL build in deps/ffmpeg (on Windows, BtbN's
+# win64-lgpl-shared). Without it the movies play black and the music is
+# silent. The DLLs are copied next to the executable.
+set(MHFU_FFMPEG_DIR "${CMAKE_CURRENT_SOURCE_DIR}/deps/ffmpeg" CACHE PATH "FFmpeg (include/, lib/, bin/)")
+if(EXISTS "${MHFU_FFMPEG_DIR}/include/libavcodec/avcodec.h")
+    message(STATUS "mhfu_host: FFmpeg from ${MHFU_FFMPEG_DIR}")
+    target_include_directories(mhfu_host PRIVATE "${MHFU_FFMPEG_DIR}/include")
+    foreach(lib avformat avcodec swscale swresample avutil)
+        find_library(MHFU_FF_${lib} ${lib} PATHS "${MHFU_FFMPEG_DIR}/lib" NO_DEFAULT_PATH REQUIRED)
+        target_link_libraries(mhfu_host PRIVATE ${MHFU_FF_${lib}})
+    endforeach()
+    target_compile_definitions(mhfu_host PRIVATE MHFU_FFMPEG=1)
+    if(WIN32)
+        file(GLOB MHFU_FF_DLLS "${MHFU_FFMPEG_DIR}/bin/*.dll")
+        add_custom_command(TARGET mhfu_host POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${MHFU_FF_DLLS} "$<TARGET_FILE_DIR:mhfu_host>")
+    endif()
+else()
+    message(STATUS "mhfu_host: no FFmpeg in ${MHFU_FFMPEG_DIR}: movies black, music silent")
+endif()
+
 # Function-entry tracing: the report then names the last function reached and
 # dumps the recent call trail. Slower, but bring-up needs it.
 option(MHFU_TRACE "Record every recompiled function entry" ON)
