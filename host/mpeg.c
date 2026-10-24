@@ -77,6 +77,7 @@ typedef struct {
     int      es[2];
     uint32_t header_off;        /* the PSMF header's length: the stream starts there */
     int      pixel_mode;        /* sceMpegAvcDecodeMode: 0-3, 565 to 8888 */
+    uint32_t frame_width;       /* sceMpegCreate's: used when a decode passes 0 (PPSSPP) */
 #if MHFU_FFMPEG
     /* The stream as put, from the file's start: [pos, len) not yet demuxed. */
     uint8_t *buf;
@@ -281,6 +282,11 @@ static int engine_frame(mpeg_ctx *c) {
             c->ended = 1;
             return -1;
         }
+        if (getenv("MHFU_DUMP_MPEG")) {                       /* the elementary stream, for ffmpeg -i */
+            static FILE *dump;
+            if (!dump) dump = fopen(getenv("MHFU_DUMP_MPEG"), "wb");
+            if (dump) fwrite(es, 1, n, dump);
+        }
         while (n > 0) {
             uint8_t *out; int out_n;
             const int used = av_parser_parse2(c->parser, c->dec, &out, &out_n, es, (int)n,
@@ -383,6 +389,7 @@ static void hle_Create(void) {
     c->handle = h;
     c->ring = ring;
     c->pixel_mode = 3;              /* 8888 until sceMpegAvcDecodeMode says otherwise */
+    c->frame_width = psp_arg(4);
     psp_ret(0);
 }
 
@@ -605,11 +612,16 @@ static void hle_AvcDecode(void) {
 #if MHFU_FFMPEG
     if (engine_open(c)) {
         const int got = engine_frame(c);
+        const uint32_t at = psp_arg(3) ? rd(psp_arg(3)) : 0;
         if (got > 0) {
-            const uint32_t at = psp_arg(3) ? rd(psp_arg(3)) : 0;
-            if (at) engine_write(c, at, psp_arg(2));
+            if (at) engine_write(c, at, psp_arg(2) ? psp_arg(2) : c->frame_width);
             c->video_frame++;
         }
+        static unsigned calls;
+        if (getenv("MHFU_TRACE_MPEG") && calls++ % 60 == 0)
+            fprintf(stderr, "mpeg: decode #%u got %d frames %u pos 0x%zX len 0x%zX put 0x%llX to 0x%08X width %u mode %d\n",
+                    calls, got, c->video_frame, c->pos, c->len, (unsigned long long)c->total_put, at, psp_arg(2),
+                    c->pixel_mode);
         update_avail(c);
         if (init && psp_mem_ptr(init, 4)) wr(init, got > 0 ? 1 : 0);
         psp_ret(0);
