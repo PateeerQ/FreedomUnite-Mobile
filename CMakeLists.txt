@@ -87,18 +87,20 @@ if(WIN32)
     target_link_libraries(mhfu_host PRIVATE user32 gdi32 opengl32)
 endif()
 
-# Gamepads (host/gamepad.c): SDL3, built static from source, with only what
-# reading a controller needs. SDL reads the DualSense and DualShock 4 itself,
-# over USB or Bluetooth, which XInput cannot. The Android port will use SDL3
-# for its window and input as well. MHFU_GAMEPAD=OFF builds without it.
-option(MHFU_GAMEPAD "Controller support through SDL3" ON)
+# Gamepads (host/gamepad.c) and sound output (host/audio.c): SDL3, built
+# static from source, with only what those need. SDL reads the DualSense and
+# DualShock 4 itself, over USB or Bluetooth, which XInput cannot, and plays
+# through WASAPI with a short buffer, where WinMM lagged the picture by about
+# 100 ms. The Android port will use SDL3 for its window, input and sound as
+# well. MHFU_GAMEPAD=OFF builds without it (WinMM sound, no controllers).
+option(MHFU_GAMEPAD "Controller support and sound through SDL3" ON)
 if(MHFU_GAMEPAD)
     include(FetchContent)
     set(SDL_SHARED OFF CACHE BOOL "" FORCE)
     set(SDL_STATIC ON CACHE BOOL "" FORCE)
     set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
     set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
-    set(SDL_AUDIO OFF CACHE BOOL "" FORCE)
+    set(SDL_AUDIO ON CACHE BOOL "" FORCE)
     set(SDL_RENDER OFF CACHE BOOL "" FORCE)
     set(SDL_GPU OFF CACHE BOOL "" FORCE)
     set(SDL_CAMERA OFF CACHE BOOL "" FORCE)
