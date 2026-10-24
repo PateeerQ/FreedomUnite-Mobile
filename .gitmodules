@@ -1,0 +1,3 @@
+[submodule "psprecomp"]
+	path = psprecomp
+	url = https://github.com/sp00nznet/psprecomp
