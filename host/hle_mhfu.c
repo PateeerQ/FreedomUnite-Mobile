@@ -217,6 +217,9 @@ static void vtimer_tick(void) {
             uint32_t next = psp_cpu.r[PSP_REG_V0];
             psp_cpu = saved;
             g_vt_fired++;
+            if (trace_vt())
+                fprintf(stderr, "vtimer %X: fired %08X at %llu (real %llu) -> %u\n", VTIMER_UID_BASE + i,
+                        handler, (unsigned long long)now, (unsigned long long)mhfu_clock_us(), next);
             /* The handler may have set a new one itself; that wins. */
             if (v->handler != handler) break;
             if (next == 0) { v->handler = 0; break; }
@@ -286,9 +289,20 @@ static void hle_GetVTimerTimeWide(void) {
     ret64(v ? vt_now(v) : 0);
 }
 
+/* MHFU_TRACE_VTIMER=1: handlers set and fired, with the timer's count. */
+static int trace_vt(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("MHFU_TRACE_VTIMER") != NULL;
+    return on;
+}
+
 static void set_handler(uint32_t uid, uint64_t schedule, uint32_t handler, uint32_t common) {
     vtimer *v = find_vt(uid);
     if (!v) { psp_ret(SCE_KERNEL_ERROR_UNKNOWN_VTID); return; }
+    if (trace_vt())
+        fprintf(stderr, "vtimer %X: set handler %08X at %llu (now %llu, real %llu) ra %08X\n", uid, handler,
+                (unsigned long long)schedule, (unsigned long long)vt_now(v),
+                (unsigned long long)mhfu_clock_us(), psp_cpu.r[PSP_REG_RA]);
     v->handler = handler;
     v->common = common;
     v->schedule = schedule;
