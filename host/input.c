@@ -20,6 +20,7 @@
 #include <windows.h>
 #endif
 
+#include "gamepad.h"
 #include "input.h"
 #include "window.h"
 
@@ -139,6 +140,7 @@ static void hle_ReadBufferPositive(void) {
     uint64_t frame = g_frame++;
     uint8_t ax = 128, ay = 128;
     uint32_t buttons = script_buttons(frame) | mhfu_window_buttons(&ax, &ay);
+    buttons |= mhfu_gamepad_read(&ax, &ay);
     if (buttons & DUMP_BIT) {
         if (!(script_buttons(frame - 1) & DUMP_BIT)) psp_ge_dump_next(2);   /* once per press */
         buttons &= ~DUMP_BIT;
