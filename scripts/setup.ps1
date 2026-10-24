@@ -50,13 +50,22 @@ function Step($msg) { Write-Host "`n=== $msg ===" -ForegroundColor Cyan }
 # by one: psprecomp's tracked files are reset to the submodule commit and the
 # whole series is applied in order. Do not edit psprecomp\ by hand -- add a
 # patch under patches\psprecomp\ instead, or the next setup will undo it.
+#
+# The series is written against upstream $upstream. Once psprecomp is on any
+# other commit, the patches are taken to be committed there, and setup leaves
+# psprecomp alone: re-applying would fail, and the reset would throw away
+# whatever is being edited in it.
 $psprecomp = Join-Path $repo "psprecomp"
+$upstream = "a10edc9"
 $patches = @(Get-ChildItem (Join-Path $repo "patches\psprecomp\*.patch") -ErrorAction SilentlyContinue |
     Sort-Object Name)
 # git writes progress to stderr, which 'Stop' would turn into an exception in
 # Windows PowerShell; exit codes are checked instead.
 $ErrorActionPreference = 'Continue'
-if ($patches.Count) {
+$head = (git -C $psprecomp rev-parse --short=7 HEAD).Trim()
+if ($patches.Count -and $head -ne $upstream) {
+    Step "psprecomp is at $head, not upstream ${upstream}: patches taken as committed, not applied"
+} elseif ($patches.Count) {
     Step "Applying $($patches.Count) psprecomp patch(es)"
     git -C $psprecomp checkout -- .
     if ($LASTEXITCODE) { throw "could not reset psprecomp" }
