@@ -236,11 +236,21 @@ static const uint8_t *demux_video(mpeg_ctx *c, size_t *n) {
         if (id == 0xB9) { c->pos += 4; continue; }           /* end code */
         const size_t total = 6 + be16(p + 4);
         if (have < total) { *n = 0; return all_put(c) ? p : NULL; }
+        static int listed;
+        if (getenv("MHFU_TRACE_MPEG") && listed++ < 24)
+            fprintf(stderr, "mpeg: at 0x%zX id %02X len %zu  %02X %02X %02X %02X %02X %02X\n", c->pos, id, total,
+                    p[6], p[7], p[8], p[9], p[10], p[11]);
         c->pos += total;
         if (id < 0xE0 || id > 0xEF || total < 9) continue;   /* not video */
         const size_t start = 9 + p[8];
         if (start > total) continue;
         *n = total - start;
+        static int shown;
+        if (getenv("MHFU_TRACE_MPEG") && p[8] && shown++ < 4) {
+            fprintf(stderr, "mpeg: PES %02X len %zu hdr %u:", id, total, p[8]);
+            for (size_t i = 0; i < 64 && i < total; i++) fprintf(stderr, " %02X", p[i]);
+            fprintf(stderr, "\n");
+        }
         return p + start;
     }
 }
