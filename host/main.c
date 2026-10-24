@@ -31,6 +31,8 @@
 #include "psprecomp/mem.h"
 #include "psprecomp/dispatch.h"
 #include "psprecomp/hle.h"
+#include "psprecomp/recomp_rt.h"
+#include "psprecomp/render.h"
 #include "psprecomp/vfpu.h"
 
 #include "adhoc.h"
@@ -414,9 +416,21 @@ int main(int argc, char **argv) {
     psp_set_miss_handler(on_miss);
     psp_dispatch_set_budget(budget, on_budget);
 
+    /* MHFU_RENDER=gl|software|null: the GE backend. gl needs the window; null
+     * draws nothing, which shows how much of a frame the rasteriser costs. */
+    const char *renderer = getenv("MHFU_RENDER");
+    if (renderer && strcmp(renderer, "gl") != 0 && psp_render_select(renderer) != 0)
+        fprintf(stderr, "unknown renderer %s\n", renderer);
+
     if (window) {
         mhfu_window_on_close(on_window_closed);
-        if (mhfu_window_start(window) == 0) mhfu_input_set_pacing(1);
+        if (mhfu_window_start(window) == 0) {
+            mhfu_input_set_pacing(1);
+            if (renderer && !strcmp(renderer, "gl")) {
+                if (mhfu_window_gl() == 0) printf("renderer: OpenGL, %dx internal resolution\n", window);
+                else fprintf(stderr, "no OpenGL; using the software renderer\n");
+            }
+        }
         else fprintf(stderr, "no window (only on Windows); running without one\n");
         /* Sound only with a window: scripted runs without one stay quiet. */
         if (mhfu_audio_start() != 0) fprintf(stderr, "no audio output; running silent\n");
@@ -432,6 +446,33 @@ int main(int argc, char **argv) {
             psp_mem_watch_write_value(at, (uint32_t)strtoul(getenv("MHFU_WATCH_VALUE"), NULL, 0));
         else psp_mem_watch_write(at);
     }
+    /* MHFU_TEST_ATAN=1: MHFU's VFPU angle function (0x088147C8: the angle from
+     * one point of an object to another, as a 16-bit turn) on eight known
+     * directions, against the host's atan2. Then exit. */
+    if (getenv("MHFU_TEST_ATAN")) {
+        const uint32_t obj = psp_sysmem_alloc(0x1000, 0);
+        static const float dir[8][2] = { { 1, 0 }, { 1, 1 }, { 0, 1 }, { -1, 1 },
+                                         { -1, 0 }, { -1, -1 }, { 0, -1 }, { 1, -1 } };
+        const psp_cpu_state saved = psp_cpu;
+        for (int i = 0; i < 8; i++) {
+            memset(psp_mem_ptr(obj, 0x1000), 0, 0x1000);
+            psp_write32(obj + 2896, psp_f32_to_bits(dir[i][0]));   /* x */
+            psp_write32(obj + 2904, psp_f32_to_bits(dir[i][1]));   /* z */
+            psp_cpu.r[PSP_REG_A0] = obj;
+            psp_cpu.r[PSP_REG_RA] = 0;
+            psp_call_from_host(0x088147C8u);
+            const uint32_t got = psp_cpu.r[PSP_REG_V0] & 0xFFFF;
+            /* The function takes atan2 of (-dz, dx), radians to 65536 a turn. */
+            double want = atan2(-(double)dir[i][1], (double)dir[i][0]);
+            if (want < 0) want += 6.283185307179586;
+            printf("atan test: dx %+.0f dz %+.0f -> 0x%04X (%.1f deg), atan2(-dz, dx) = %.1f deg\n",
+                   dir[i][0], dir[i][1], got, got * 360.0 / 65536.0, want * 57.29577951308232);
+            psp_cpu = saved;
+        }
+        fflush(stdout);
+        _Exit(0);
+    }
+
     start_watchdog();
     psp_call_from_host(img.entry);
     printf("\nentry returned, v0 = 0x%08X; running the threads it started\n",
