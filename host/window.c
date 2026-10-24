@@ -17,6 +17,7 @@
 #include "psprecomp/hle.h"
 #include "psprecomp/mem.h"
 #include "psprecomp/render.h"
+#include "audio.h"
 #include "input.h"
 #include "lobby.h"
 
@@ -68,9 +69,15 @@ static void update_fps(void) {
         log_ms = now; log_flips = flips; log_vblanks = psp_display_vblanks(); log_reads = mhfu_input_frames();
     } else if (now - log_ms >= 10000) {
         const double s = (double)(now - log_ms) / 1000.0;
-        printf("fps: %.1f over the last %.0f s (vblank waits %.1f/s, controller reads %.1f/s)\n",
+        static uint64_t log_ain, log_ashort, log_adrop;
+        uint64_t ain, ashort, adrop;
+        mhfu_audio_stats(&ain, &ashort, &adrop);
+        printf("fps: %.1f over the last %.0f s (vblank waits %.1f/s, controller reads %.1f/s)"
+               "  audio: %.0f frames/s in, %llu short, %llu dropped\n",
                (double)(flips - log_flips) / s, s, (double)(psp_display_vblanks() - log_vblanks) / s,
-               (double)(mhfu_input_frames() - log_reads) / s);
+               (double)(mhfu_input_frames() - log_reads) / s, (double)(ain - log_ain) / s,
+               (unsigned long long)(ashort - log_ashort), (unsigned long long)(adrop - log_adrop));
+        log_ain = ain; log_ashort = ashort; log_adrop = adrop;
         fflush(stdout);
         log_ms = now;
         log_flips = flips;
