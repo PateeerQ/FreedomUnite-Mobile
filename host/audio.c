@@ -1,0 +1,118 @@
+/* MHFU-Android -- see audio.h.
+ *
+ * Each PSP output channel feeds a ring of stereo 16-bit frames. A WinMM
+ * stream at 44.1 kHz pulls from all of them, mixed, a few buffers ahead. A
+ * channel that falls behind plays silence; one that runs ahead loses its
+ * oldest frames, so latency stays bounded (the guest is paced by psprecomp's
+ * blocking output, not by this). */
+#include "audio.h"
+
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "psprecomp/hle.h"
+
+#define CHANNELS   8
+#define RING       16384          /* frames per channel, about 0.37 s */
+#define MAX_AHEAD  (4096 + 2048)  /* frames a channel may queue before dropping */
+
+typedef struct {
+    int16_t buf[RING * 2];
+    volatile uint32_t rd, wr;     /* frame counters; the ring is wr - rd frames full */
+} ring;
+
+static ring g_ring[CHANNELS];
+
+/* psprecomp's sceAudio hands every buffer here (patch 0014). */
+static void sink(int ch, const int16_t *pcm, uint32_t frames, int stereo, int vol_l, int vol_r) {
+    if (ch < 0 || ch >= CHANNELS || !pcm) return;
+    ring *r = &g_ring[ch];
+    uint32_t wr = r->wr;
+    if (wr - r->rd > MAX_AHEAD) r->rd = wr - MAX_AHEAD;   /* too far ahead: drop the oldest */
+    for (uint32_t i = 0; i < frames; i++) {
+        int32_t l = stereo ? pcm[2 * i] : pcm[i];
+        int32_t rr = stereo ? pcm[2 * i + 1] : pcm[i];
+        uint32_t at = (wr + i) % RING;
+        r->buf[2 * at] = (int16_t)(l * vol_l / 0x8000);
+        r->buf[2 * at + 1] = (int16_t)(rr * vol_r / 0x8000);
+    }
+    r->wr = wr + frames;
+}
+
+static void mix(int16_t *out, uint32_t frames) {
+    static int32_t acc[2 * 2048];
+    memset(acc, 0, (size_t)frames * 2 * sizeof acc[0]);
+    for (int c = 0; c < CHANNELS; c++) {
+        ring *r = &g_ring[c];
+        uint32_t have = r->wr - r->rd, n = have < frames ? have : frames;
+        for (uint32_t i = 0; i < n; i++) {
+            uint32_t at = (r->rd + i) % RING;
+            acc[2 * i] += r->buf[2 * at];
+            acc[2 * i + 1] += r->buf[2 * at + 1];
+        }
+        r->rd += n;
+    }
+    for (uint32_t i = 0; i < frames * 2; i++)
+        out[i] = (int16_t)(acc[i] > 32767 ? 32767 : acc[i] < -32768 ? -32768 : acc[i]);
+}
+
+#ifdef _WIN32
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <mmsystem.h>
+#pragma comment(lib, "winmm.lib")
+
+#define NBUF    4
+#define FRAMES  1024              /* per buffer: 23 ms */
+
+static HWAVEOUT g_wo;
+static WAVEHDR  g_hdr[NBUF];
+static int16_t  g_pcm[NBUF][FRAMES * 2];
+
+static DWORD WINAPI feeder(LPVOID ev) {
+    for (;;) {
+        WaitForSingleObject((HANDLE)ev, 50);
+        for (int i = 0; i < NBUF; i++) {
+            if (!(g_hdr[i].dwFlags & WHDR_DONE)) continue;
+            mix(g_pcm[i], FRAMES);
+            g_hdr[i].dwFlags &= ~WHDR_DONE;
+            waveOutWrite(g_wo, &g_hdr[i], sizeof g_hdr[i]);
+        }
+    }
+    return 0;
+}
+
+int mhfu_audio_start(void) {
+    WAVEFORMATEX f;
+    memset(&f, 0, sizeof f);
+    f.wFormatTag = WAVE_FORMAT_PCM;
+    f.nChannels = 2;
+    f.nSamplesPerSec = 44100;
+    f.wBitsPerSample = 16;
+    f.nBlockAlign = 4;
+    f.nAvgBytesPerSec = 44100 * 4;
+    HANDLE ev = CreateEventA(NULL, FALSE, FALSE, NULL);
+    if (!ev || waveOutOpen(&g_wo, WAVE_MAPPER, &f, (DWORD_PTR)ev, 0, CALLBACK_EVENT) != MMSYSERR_NOERROR)
+        return -1;
+    for (int i = 0; i < NBUF; i++) {
+        memset(&g_hdr[i], 0, sizeof g_hdr[i]);
+        g_hdr[i].lpData = (LPSTR)g_pcm[i];
+        g_hdr[i].dwBufferLength = sizeof g_pcm[i];
+        waveOutPrepareHeader(g_wo, &g_hdr[i], sizeof g_hdr[i]);
+        g_hdr[i].dwFlags |= WHDR_DONE;            /* the feeder fills it first */
+    }
+    HANDLE t = CreateThread(NULL, 0, feeder, ev, 0, NULL);
+    if (!t) return -1;
+    SetThreadPriority(t, THREAD_PRIORITY_TIME_CRITICAL);
+    CloseHandle(t);
+    psp_audio_set_sink(sink);
+    return 0;
+}
+
+#else
+
+int mhfu_audio_start(void) { (void)mix; psp_audio_set_sink(sink); return -1; }
+
+#endif
