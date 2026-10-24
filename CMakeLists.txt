@@ -80,7 +80,7 @@ endif()
 list(APPEND MHFU_GEN_SOURCES ${MHFU_OVL_SOURCES})
 
 add_executable(mhfu_host host/main.c host/hle_mhfu.c host/input.c host/window.c host/libfont.c host/utility.c
-               host/adhoc.c host/lobby.c host/audio.c host/atrac.c ${MHFU_GEN_SOURCES})
+               host/adhoc.c host/lobby.c host/audio.c host/atrac.c host/mpeg.c ${MHFU_GEN_SOURCES})
 target_include_directories(mhfu_host PRIVATE "${MHFU_GEN_DIR}" host)
 target_link_libraries(mhfu_host PRIVATE psprecomp mhfu_net)
 if(WIN32)
