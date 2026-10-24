@@ -35,6 +35,7 @@
 
 #include "adhoc.h"
 #include "atrac.h"
+#include "mpeg.h"
 #include "audio.h"
 #include "hle_mhfu.h"
 #include "input.h"
@@ -349,6 +350,7 @@ int main(int argc, char **argv) {
     snprintf(ovl_dir, sizeof ovl_dir, "%s/../overlays", g_root);
     mhfu_hle_register(ovl_dir);
     mhfu_atrac_register();
+    mhfu_mpeg_register();
     char font_dir[600];
     snprintf(font_dir, sizeof font_dir, "%s/flash0/font", g_root);
     mhfu_libfont_register(font_dir);
