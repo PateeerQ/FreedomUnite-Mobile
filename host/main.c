@@ -175,6 +175,15 @@ static void report(void) {
            (unsigned long long)psp_ge_command_count(), (unsigned long long)psp_ge_vertex_count());
     printf("GE callbacks run   %llu\n", (unsigned long long)psp_ge_callbacks_run());
     psp_ge_dump_stats(stdout);
+    /* MHFU_PEEK=addr[,words]: memory as the run left it, e.g. a table found
+     * through a pointer that only the end state can resolve. */
+    if (getenv("MHFU_PEEK")) {
+        unsigned long a = 0, n = 8;
+        sscanf(getenv("MHFU_PEEK"), "%lx,%lu", &a, &n);
+        printf("peek 0x%08lX:", a);
+        for (unsigned long i = 0; i < n; i++) printf(" %08X", psp_read32((uint32_t)(a + i * 4)));
+        printf("\n");
+    }
     psp_vfpu_report(stdout);
     printf("font glyphs drawn  %llu\n", (unsigned long long)mhfu_libfont_glyphs());
     printf("game frames        %llu  (controller reads)\n", (unsigned long long)mhfu_input_frames());
