@@ -10,9 +10,9 @@
     report at the end (and work\run.log) is what to look at.
 
     -Window opens a window that shows the game and takes the keyboard:
-    arrows = D-pad, X = Cross, S = Circle, Z = Square, A = Triangle,
-    Q = L, W = R, Space/Enter = Start, V/Backspace = Select, I/J/K/L = stick.
-    The game then runs at 60 frames a second; close the window to stop.
+    W/A/S/D = analog stick, arrows = D-pad, K/Space = Cross, L = Circle,
+    J = Square, I = Triangle, Q = L, E = R, Enter = Start, V/Backspace =
+    Select, F3 = FPS line. Close the window to stop.
 
     -Press feeds timed presses, counted in game frames (one controller read
     each): "300:CROSS,420:START,500-560:UP". -Snap N saves every Nth frame to
@@ -27,6 +27,7 @@
     .\scripts\run.ps1 -Window
     .\scripts\run.ps1 -Press "300:CROSS" -Snap 60
     .\scripts\run.ps1 -Window -Name "Fathir"
+    .\scripts\run.ps1 -Window -Renderer software
 #>
 [CmdletBinding()]
 param(
@@ -49,6 +50,9 @@ param(
     # Diagnostics: switch the depth buffer off / restore the old VFPU behaviour
     # (all of it, or -VfpuOff "prefix,vrot,vdiv" for parts).
     [switch]$NoDepth,
+    # The GE renderer: gl (default; needs -Window, at -Scale times 480x272),
+    # software (the reference rasteriser, writes guest VRAM) or null.
+    [ValidateSet("gl", "software", "null")] [string]$Renderer = "gl",
     [switch]$VfpuCompat,
     [string]$VfpuOff,
     # Multiplayer (see host\lobby.h): open a room, or join one by its code.
@@ -116,6 +120,7 @@ if ($NetJoin)   { $extra += " --net-join `"$NetJoin`"" }
 if ($Nick)      { $extra += " --nick `"$Nick`"" }
 if ($Mac)       { $extra += " --mac $Mac" }
 if ($Relay)     { $extra += " --relay $Relay" }
+$env:MHFU_RENDER          = $Renderer
 $env:PSPRECOMP_NO_DEPTH    = if ($NoDepth)    { "1" } else { "" }
 $env:PSPRECOMP_VFPU_COMPAT = if ($VfpuCompat) { "1" } elseif ($VfpuOff) { $VfpuOff } else { "" }
 if ($Snap -gt 0) {
@@ -131,6 +136,7 @@ New-Item -ItemType Directory -Force $logs | Out-Null
 $tag = (Get-Date -Format "yyyyMMdd-HHmmss")
 if ($VfpuCompat) { $tag += "-vfpucompat" } elseif ($VfpuOff) { $tag += "-off-" + ($VfpuOff -replace '[^a-z0-9]', '_') }
 if ($NoDepth) { $tag += "-nodepth" }
+if ($Renderer -ne "gl") { $tag += "-$Renderer" }
 Copy-Item $log (Join-Path $logs "run-$tag.log")
 $frame = Join-Path $root "frame.ppm"
 if (Test-Path $frame) { Copy-Item $frame (Join-Path $logs "frame-$tag.ppm") }
