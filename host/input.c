@@ -24,6 +24,7 @@
 #include "window.h"
 
 #define HOLD_FRAMES 6
+#define DUMP_BIT    0x80000000u
 #define MAX_PRESSES 256
 
 typedef struct { uint64_t from, to; uint32_t buttons; } press;
@@ -65,6 +66,9 @@ static const struct { const char *name; uint32_t bit; } k_names[] = {
     { "UP", PSP_CTRL_UP }, { "DOWN", PSP_CTRL_DOWN },
     { "LEFT", PSP_CTRL_LEFT }, { "RIGHT", PSP_CTRL_RIGHT },
     { "L", PSP_CTRL_LTRIGGER }, { "R", PSP_CTRL_RTRIGGER },
+    /* Not a button: dumps the next two display lists (one frame) to
+     * ge_dump.txt, for "what is drawn at this point". */
+    { "DUMP", DUMP_BIT },
 };
 
 static int parse_buttons(const char *s, size_t n, uint32_t *out) {
@@ -127,6 +131,10 @@ static void hle_ReadBufferPositive(void) {
     uint64_t frame = g_frame++;
     uint8_t ax = 128, ay = 128;
     uint32_t buttons = script_buttons(frame) | mhfu_window_buttons(&ax, &ay);
+    if (buttons & DUMP_BIT) {
+        if (!(script_buttons(frame - 1) & DUMP_BIT)) psp_ge_dump_next(2);   /* once per press */
+        buttons &= ~DUMP_BIT;
+    }
     uint32_t stamp = (uint32_t)psp_threadman_vtime_us();
 
     for (uint32_t i = 0; i < count; i++) {
