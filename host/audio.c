@@ -1,7 +1,8 @@
 /* MHFU-Android -- see audio.h.
  *
- * Each PSP output channel feeds a ring of stereo 16-bit frames. A WinMM
- * stream at 44.1 kHz pulls from all of them, mixed, a few buffers ahead. A
+ * Each PSP output channel feeds a ring of stereo 16-bit frames. The output --
+ * SDL3 (WASAPI on Windows, AAudio on Android) when it is linked, else WinMM --
+ * pulls from all of them at 44.1 kHz, mixed. A
  * channel that falls behind plays silence; one that runs ahead loses its
  * oldest frames, so latency stays bounded (the guest is paced by psprecomp's
  * blocking output, not by this). */
@@ -71,7 +72,44 @@ static void mix(int16_t *out, uint32_t frames) {
         out[i] = (int16_t)(acc[i] > 32767 ? 32767 : acc[i] < -32768 ? -32768 : acc[i]);
 }
 
-#ifdef _WIN32
+#if MHFU_GAMEPAD   /* SDL3 is linked: play through it */
+
+#include <SDL3/SDL.h>
+#include <stdio.h>
+
+/* SDL asks for bytes as its device drains; they are mixed then. */
+static void SDLCALL pull(void *user, SDL_AudioStream *stream, int additional, int total) {
+    (void)user; (void)total;
+    static int16_t pcm[2048 * 2];
+    while (additional > 0) {
+        uint32_t frames = (uint32_t)additional / 4;
+        if (frames == 0) break;
+        if (frames > 2048) frames = 2048;
+        mix(pcm, frames);
+        SDL_PutAudioStreamData(stream, pcm, (int)frames * 4);
+        additional -= (int)frames * 4;
+    }
+}
+
+int mhfu_audio_start(void) {
+    /* A short device buffer: 256 frames, under 6 ms. */
+    SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, "256");
+    if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+        fprintf(stderr, "audio: SDL: %s\n", SDL_GetError());
+        return -1;
+    }
+    const SDL_AudioSpec spec = { SDL_AUDIO_S16, 2, 44100 };
+    SDL_AudioStream *s = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, pull, NULL);
+    if (!s) {
+        fprintf(stderr, "audio: SDL: %s\n", SDL_GetError());
+        return -1;
+    }
+    psp_audio_set_sink(sink);
+    SDL_ResumeAudioStreamDevice(s);
+    return 0;
+}
+
+#elif defined(_WIN32)
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -79,7 +117,7 @@ static void mix(int16_t *out, uint32_t frames) {
 #pragma comment(lib, "winmm.lib")
 
 #define NBUF    4
-#define FRAMES  1024              /* per buffer: 23 ms */
+#define FRAMES  512               /* per buffer: 11.6 ms; the four are the output latency */
 
 static HWAVEOUT g_wo;
 static WAVEHDR  g_hdr[NBUF];
