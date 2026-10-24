@@ -24,7 +24,14 @@ boots to its language selection screen.
 | `host/utility.c` | sceUtility savedata (to `work/root/ms/PSP/SAVEDATA`) and system message dialogs |
 | `seeds/eboot.txt` | EBOOT functions only reached through a register-built address |
 | `host/input.c` | controller: scripted presses, the window's keys, frame snapshots |
-| `host/window.c` | a Windows window that shows the framebuffer and reads the keyboard |
+| `host/window.c` | a Windows window that shows the framebuffer, reads the keyboard, and has the Multiplayer menu |
+| `host/lobby.c` | "Create Server" / "Join Server": rooms by code, settings in `<root>/net.cfg` |
+| `host/adhoc.c` | sceNet, sceNetAdhoc (PDP/PTP), sceNetAdhocctl and sceWlan over the room network |
+| `host/net/` | the room network: protocol (`proto.h`), hub, client, sockets/threads for Windows and POSIX |
+| `tools/mhfu_hub.c` | the standalone room hub, for a server reachable from the internet |
+| `tools/mhfu_netcheck.c` | end-to-end check of the room network without the game |
+| `scripts/harvest.ps1` | runs and re-runs setup until a scripted path loads no new overlay |
+| `seeds/ov<hash>.txt` | per-overlay functions only reached through a pointer built at run time |
 | `host/overlays.h` | table of recompiled overlays (`work/gen_ovl/overlays.c`, written by setup) |
 | `tools/mhfu_ovl.c` | wraps an overlay the host saved as an ELF for `allegrexrecomp` |
 | `patches/psprecomp/` | fixes to psprecomp not upstream yet; `setup.ps1` applies them |
