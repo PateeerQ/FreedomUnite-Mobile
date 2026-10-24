@@ -8,4 +8,9 @@
  * failure the game runs silent, as before. */
 int mhfu_audio_start(void);
 
+/* Totals since the start: frames the game sent, frames missing when the
+ * output needed them (gaps), and frames dropped for running too far ahead. */
+#include <stdint.h>
+void mhfu_audio_stats(uint64_t *in, uint64_t *short_, uint64_t *dropped);
+
 #endif

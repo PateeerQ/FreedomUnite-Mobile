@@ -24,12 +24,24 @@ typedef struct {
 
 static ring g_ring[CHANNELS];
 
+/* For the log: frames the game sent, frames the output wanted but a playing
+ * channel did not have (heard as gaps), frames dropped for running ahead. */
+static volatile uint64_t g_in_frames, g_short_frames, g_dropped_frames;
+
+void mhfu_audio_stats(uint64_t *in, uint64_t *short_, uint64_t *dropped) {
+    *in = g_in_frames; *short_ = g_short_frames; *dropped = g_dropped_frames;
+}
+
 /* psprecomp's sceAudio hands every buffer here (patch 0014). */
 static void sink(int ch, const int16_t *pcm, uint32_t frames, int stereo, int vol_l, int vol_r) {
     if (ch < 0 || ch >= CHANNELS || !pcm) return;
     ring *r = &g_ring[ch];
     uint32_t wr = r->wr;
-    if (wr - r->rd > MAX_AHEAD) r->rd = wr - MAX_AHEAD;   /* too far ahead: drop the oldest */
+    if (wr - r->rd > MAX_AHEAD) {                         /* too far ahead: drop the oldest */
+        g_dropped_frames += wr - r->rd - MAX_AHEAD;
+        r->rd = wr - MAX_AHEAD;
+    }
+    g_in_frames += frames;
     for (uint32_t i = 0; i < frames; i++) {
         int32_t l = stereo ? pcm[2 * i] : pcm[i];
         int32_t rr = stereo ? pcm[2 * i + 1] : pcm[i];
@@ -46,6 +58,8 @@ static void mix(int16_t *out, uint32_t frames) {
     for (int c = 0; c < CHANNELS; c++) {
         ring *r = &g_ring[c];
         uint32_t have = r->wr - r->rd, n = have < frames ? have : frames;
+        /* A channel that has played and now runs short leaves a gap. */
+        if (r->wr && n < frames) g_short_frames += frames - n;
         for (uint32_t i = 0; i < n; i++) {
             uint32_t at = (r->rd + i) % RING;
             acc[2 * i] += r->buf[2 * at];
