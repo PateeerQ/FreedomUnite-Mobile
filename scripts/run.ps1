@@ -51,6 +51,17 @@ param(
     [switch]$NoDepth,
     [switch]$VfpuCompat,
     [string]$VfpuOff,
+    # Multiplayer (see host\lobby.h): open a room, or join one by its code.
+    # -Root runs a second player on this PC with its own saves and settings
+    # (e.g. work\root2; ms\ is copied from work\root the first time).
+    [switch]$NetCreate,
+    [string]$NetJoin,
+    [string]$Nick,
+    [string]$Mac,
+    [string]$Relay,
+    # (-Root for short. Not named $Root: PowerShell names ignore case, and
+    # the script's own $root is the device root.)
+    [Alias("Root")] [string]$DeviceRoot,
     [string]$Config = "Release"
 )
 
@@ -73,6 +84,18 @@ New-Item -ItemType Directory -Force (Join-Path $work "overlays") | Out-Null
 if (-not $NoTraceIo) { $env:PSPRECOMP_TRACE_IO = "1" }
 $eboot = Join-Path $work "ULES01213_EBOOT.BIN"
 $root  = Join-Path $work "root"
+if ($DeviceRoot) {
+    # A second device: its own memory stick and net.cfg, the same disc.
+    $main = $root
+    $root = if ([IO.Path]::IsPathRooted($DeviceRoot)) { $DeviceRoot } else { Join-Path $repo $DeviceRoot }
+    New-Item -ItemType Directory -Force $root | Out-Null
+    foreach ($d in "ms", "flash0") {
+        if (-not (Test-Path (Join-Path $root $d)) -and (Test-Path (Join-Path $main $d))) {
+            Copy-Item -Recurse (Join-Path $main $d) (Join-Path $root $d)
+        }
+    }
+    $log = Join-Path $work ("run-" + (Split-Path -Leaf $root) + ".log")
+}
 $isoTxt = Join-Path $work "iso.txt"
 if (-not $Iso -and (Test-Path $isoTxt)) { $Iso = (Get-Content $isoTxt -TotalCount 1).Trim() }
 $isoArg = ""
@@ -88,6 +111,11 @@ $extra = ""
 if ($Window) { $extra += " --window $Scale" }
 if ($Press)  { $extra += " --press `"$Press`"" }
 if ($Name)   { $extra += " --name `"$Name`"" }
+if ($NetCreate) { $extra += " --net-create" }
+if ($NetJoin)   { $extra += " --net-join `"$NetJoin`"" }
+if ($Nick)      { $extra += " --nick `"$Nick`"" }
+if ($Mac)       { $extra += " --mac $Mac" }
+if ($Relay)     { $extra += " --relay $Relay" }
 $env:PSPRECOMP_NO_DEPTH    = if ($NoDepth)    { "1" } else { "" }
 $env:PSPRECOMP_VFPU_COMPAT = if ($VfpuCompat) { "1" } elseif ($VfpuOff) { $VfpuOff } else { "" }
 if ($Snap -gt 0) {
