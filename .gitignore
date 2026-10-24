@@ -28,6 +28,9 @@ DATA.BIN
 keys/
 *.keys
 
+# Third-party binaries fetched for the build (FFmpeg); see CMakeLists.txt
+deps/
+
 # Loose psprecomp download (the submodule at psprecomp/ replaces it)
 psprecomp-*/
 
