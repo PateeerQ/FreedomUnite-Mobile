@@ -396,8 +396,10 @@ static void hle_SetCompiledSdkVersion(void) { psp_ret(0); }
  * Each overlay starts with an "MWo3" header (see tools/mhfu_ovl.c). At
  * IcacheInvalidateAll every slot is checked: when its overlay changed, the
  * old overlay's functions are unregistered and the new one's recompiled
- * functions registered, found by a hash of header + code + data. An overlay
- * with no recompiled version yet is saved to <overlay_dir>/slot<N>_<hash>.bin
+ * functions registered, found by a hash of header + code. (Not the data: the
+ * game writes into an overlay's data before the cache is invalidated, so one
+ * lobby_task.ovl showed up under four hashes, each "not recompiled".) An
+ * overlay with no recompiled version yet is saved to <overlay_dir>/slot<N>_<hash>.bin
  * -- setup.ps1 recompiles every file there on its next run. */
 
 #define OVL_TABLE 0x089CBA70u
@@ -453,9 +455,10 @@ static void check_overlays(void) {
         uint32_t a = ovl_start(i), b = ovl_start(i + 1);
         if (!a || b <= a) continue;
 
-        uint32_t hash = 0, n = 0;
+        uint32_t hash = 0, n = 0, hashed = 0;
         if (psp_read32(a) == OVL_MAGIC) {
-            n = OVL_HDR + psp_read32(a + 12) + psp_read32(a + 16);
+            hashed = OVL_HDR + psp_read32(a + 12);
+            n = hashed + psp_read32(a + 16);
             if (n > b - a) n = 0;
         }
         uint8_t *buf = NULL;
@@ -463,7 +466,7 @@ static void check_overlays(void) {
             buf = (uint8_t *)malloc(n);
             if (!buf) return;
             for (uint32_t k = 0; k < n; k++) buf[k] = psp_read8(a + k);
-            hash = fnv1a(buf, n);
+            hash = fnv1a(buf, hashed);
         }
         if (hash == g_ovl_hash[i]) { free(buf); continue; }
 
