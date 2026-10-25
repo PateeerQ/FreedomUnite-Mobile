@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "about.h"
 #include "net/client.h"
 #include "net/hub.h"
 #include "net/sys.h"
@@ -15,6 +16,7 @@ static char     g_nick[MHN_NICK_LEN] = "Hunter";
 static uint8_t  g_mac[6];
 static char     g_relay[256];
 static uint16_t g_relay_port = MHN_PORT;
+static char     g_cfg_relay[256];    /* net.cfg's own relay= line: the only relay saved back */
 static mhn_hub *g_hub;           /* the in-app hub, while this app hosts a LAN room */
 static int      g_on_relay;
 
@@ -44,7 +46,7 @@ static void save_cfg(void) {
     fprintf(f, "nick=%s\n", g_nick);
     fprintf(f, "mac=%02X:%02X:%02X:%02X:%02X:%02X\n", g_mac[0], g_mac[1], g_mac[2], g_mac[3], g_mac[4], g_mac[5]);
     fprintf(f, "# relay=host:port of a public mhfu_hub, for rooms over the internet\n");
-    if (g_relay[0]) fprintf(f, "relay=%s:%u\n", g_relay, g_relay_port);
+    if (g_cfg_relay[0]) fprintf(f, "relay=%s\n", g_cfg_relay);
     fclose(f);
 }
 
@@ -58,7 +60,7 @@ void mhfu_lobby_init(const char *dir, const char *nick, const char *mac, const c
             trim(line);
             if (!strncmp(line, "nick=", 5)) snprintf(g_nick, sizeof g_nick, "%s", line + 5);
             else if (!strncmp(line, "mac=", 4)) have_mac = parse_mac(line + 4, g_mac) == 0;
-            else if (!strncmp(line, "relay=", 6)) set_relay(line + 6);
+            else if (!strncmp(line, "relay=", 6)) snprintf(g_cfg_relay, sizeof g_cfg_relay, "%s", line + 6);
         }
         fclose(f);
     }
@@ -69,6 +71,8 @@ void mhfu_lobby_init(const char *dir, const char *nick, const char *mac, const c
         g_mac[2] = 'H';
     }
     if (!f || !have_mac) save_cfg();
+    /* net.cfg's relay, else the build's (never saved: a newer build may move it). */
+    set_relay(g_cfg_relay[0] ? g_cfg_relay : MHFU_DEFAULT_RELAY);
     if (nick && nick[0]) snprintf(g_nick, sizeof g_nick, "%s", nick);
     if (mac && mac[0]) parse_mac(mac, g_mac);
     if (relay && relay[0]) set_relay(relay);
@@ -105,14 +109,16 @@ int mhfu_lobby_check_passcode(const char *p) {
     return 0;
 }
 
-int mhfu_lobby_create(const char *pass, char *err, size_t cap) {
+int mhfu_lobby_has_relay(void) { return g_relay[0] != 0; }
+
+int mhfu_lobby_create(const char *pass, int internet, char *err, size_t cap) {
     mhfu_lobby_leave();
     if (mhfu_lobby_check_passcode(pass) != 0) { snprintf(err, cap, "A passcode is 4 digits, or empty."); return -1; }
     if (!pass) pass = "";
-    if (g_relay[0]) {
+    if (internet && g_relay[0]) {
         int st = mhn_client_start(g_relay, g_relay_port, 1, NULL, g_mac, g_nick, pass);
         if (st == MHN_OK) { g_on_relay = 1; return 0; }
-        snprintf(err, cap, "Relay %s: %s.", g_relay, status_text(st));
+        snprintf(err, cap, "The internet server: %s.", status_text(st));
         return -1;
     }
     g_hub = mhn_hub_new(MHN_PORT, 1, 0);
@@ -180,7 +186,7 @@ int mhfu_lobby_join(const char *code_in, const char *pass, char *err, size_t cap
         snprintf(err, cap, "%s: %s.", code, status_text(st));
         return -1;
     }
-    snprintf(err, cap, "No room %s on this network. (Over the internet, set relay= in net.cfg.)", code);
+    snprintf(err, cap, "No room %s on this network.", code);
     return -1;
 }
 

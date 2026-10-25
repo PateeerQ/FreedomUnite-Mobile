@@ -3,15 +3,15 @@
  * later the Android overlay) calls these; the game's ad hoc calls then go
  * through whatever room this is in (adhoc.c).
  *
- * Create: if a relay is configured, the room is made there and works over the
- * internet; otherwise a hub starts inside this app, for players on the same
- * Wi-Fi or hotspot. Join: the code is looked for on the LAN first, then on the
- * relay. Players never type an address either way.
+ * Create: on the relay (over the internet), or with a hub inside this app for
+ * players on the same Wi-Fi or hotspot. Join: the code is looked for on the
+ * LAN first, then on the relay. Players never type an address either way.
+ * The relay is net.cfg's relay=, else the build's (MHFU_DEFAULT_RELAY).
  *
  * Settings live in <root>/net.cfg (written on first run):
  *     nick=Hunter
  *     mac=02:4D:48:xx:xx:xx      a random locally administered address
- *     relay=host[:port]          optional: a public mhfu_hub */
+ *     relay=host[:port]          optional: a public mhfu_hub other than the build's */
 #ifndef MHFU_LOBBY_H
 #define MHFU_LOBBY_H
 
@@ -28,7 +28,9 @@ void mhfu_lobby_init(const char *dir, const char *nick, const char *mac, const c
  * Rooms work as Monster Hunter's online lobbies do: every open room is listed
  * (who hosts it, how many are in), and a room may have a 4-digit passcode
  * that joining it asks for. The code (MH-4K7Q) still joins directly. */
-int  mhfu_lobby_create(const char *passcode, char *err, size_t cap);   /* "" or NULL: no passcode */
+int  mhfu_lobby_create(const char *passcode, int internet, char *err, size_t cap);   /* "" or NULL: no passcode */
+/* Whether there is a relay to make rooms on (else create stays on the LAN). */
+int  mhfu_lobby_has_relay(void);
 int  mhfu_lobby_join(const char *code, const char *passcode, char *err, size_t cap);
 void mhfu_lobby_leave(void);
 
