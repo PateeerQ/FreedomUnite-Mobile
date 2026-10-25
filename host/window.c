@@ -20,6 +20,7 @@
 #include "audio.h"
 #include "input.h"
 #include "lobby.h"
+#include "net/client.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -78,6 +79,18 @@ static void update_fps(void) {
                (double)(mhfu_input_frames() - log_reads) / s, (double)(ain - log_ain) / s,
                (unsigned long long)(ashort - log_ashort), (unsigned long long)(adrop - log_adrop));
         log_ain = ain; log_ashort = ashort; log_adrop = adrop;
+        /* Ad hoc datagrams, once there are any: how long the game left them
+         * waiting is the delay other players see. */
+        static uint64_t log_pin, log_pread, log_pdrop, log_pwait;
+        uint64_t pin, pread, pdrop, pwait, pmax;
+        mhn_pdp_stats(&pin, &pread, &pdrop, &pwait, &pmax);
+        if (pin != log_pin || pread != log_pread)
+            printf("net: PDP %.0f in/s, %.0f read/s, %llu dropped, waited %.0f ms on average (worst %llu ms)\n",
+                   (double)(pin - log_pin) / s, (double)(pread - log_pread) / s,
+                   (unsigned long long)(pdrop - log_pdrop),
+                   pread > log_pread ? (double)(pwait - log_pwait) / (double)(pread - log_pread) : 0.0,
+                   (unsigned long long)pmax);
+        log_pin = pin; log_pread = pread; log_pdrop = pdrop; log_pwait = pwait;
         fflush(stdout);
         log_ms = now;
         log_flips = flips;
