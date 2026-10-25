@@ -14,7 +14,8 @@ Desktop bring-up on Windows (PC first, Android after). The game boots, plays
 its movies, creates and saves a character, loads the save and runs the village
 (Pokke), the house and the Training School in 3D at its own 30 fps, with
 sound, music, keyboard and DualSense/Xbox controllers. A village quest has been
-played from start to finish without a crash.
+played from start to finish without a crash, and two players have hunted
+together through a room (ad hoc multiplayer).
 
 ### Progress
 
@@ -32,7 +33,7 @@ switched in when the game loads it; "tested" means someone has played through it
 | Movies | ![90%](https://img.shields.io/badge/90%25-brightgreen?style=flat-square) | H.264 + ATRAC3+ via FFmpeg, own PSMF demuxer |
 | Input | ![90%](https://img.shields.io/badge/90%25-brightgreen?style=flat-square) | keyboard, controllers (right stick = camera), text box for the game's keyboard |
 | Save data | ![80%](https://img.shields.io/badge/80%25-brightgreen?style=flat-square) | save and load work (unencrypted) |
-| Multiplayer (ad hoc over rooms) | ![40%](https://img.shields.io/badge/40%25-yellow?style=flat-square) | rooms with list + passcode work and are tested without the game; not yet in game |
+| Multiplayer (ad hoc over rooms) | ![75%](https://img.shields.io/badge/75%25-yellow?style=flat-square) | two players in one room: Online Gathering Hall and a quest together work, smooth in quests; movement in the hall lags; internet relay untested |
 | Gameplay coverage | ![40%](https://img.shields.io/badge/40%25-yellow?style=flat-square) | village life and a full quest (out, region changes, back) work; the Gathering Hall, more maps and monsters untested |
 | PC release (launcher) | ![0%](https://img.shields.io/badge/0%25-lightgrey?style=flat-square) | after the game works end to end |
 | Android port | ![0%](https://img.shields.io/badge/0%25-lightgrey?style=flat-square) | NDK + SDL3, touch buttons, GLES renderer |
