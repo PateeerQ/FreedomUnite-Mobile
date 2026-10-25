@@ -165,6 +165,9 @@ static void hle_PdpCreate(void) {
     int id = mhn_pdp_create((uint16_t)psp_arg(1));
     if (id == MHN_ERR_PORT_IN_USE) { psp_ret(ADHOC_PORT_IN_USE); return; }
     if (id <= 0) { psp_ret(ADHOC_SOCKET_ID_NOT_AVAIL); return; }
+    const uint32_t bufsize = psp_arg(2);
+    mhn_pdp_set_limit(id, (int)bufsize);
+    printf("adhoc: PDP socket %d on port %u, buffer %u bytes\n", id, (unsigned)(uint16_t)psp_arg(1), bufsize);
     psp_ret((uint32_t)id);
 }
 
@@ -683,6 +686,62 @@ static void hle_CtlGetAdhocId(void) {
     psp_ret(0);
 }
 
+/* ---- sceUtilityNetconf ----
+ *
+ * The system's network dialog. MHFU opens it to enter the Online Gathering
+ * Hall: in its ad hoc actions it creates or joins the group named in
+ * adhocparam, and finishes once connected (PPSSPP's PSPNetconfDialog). Here
+ * that is the same group connect as sceNetAdhocctlCreate, through the room.
+ * SceUtilityNetconfParam: common (48), netAction@48, adhocparam@52 ->
+ * { char name[8]; u32 timeout; }. */
+
+enum { NC_NONE, NC_INIT, NC_RUNNING, NC_FINISHED, NC_SHUTDOWN };
+enum { NC_CONNECT_ADHOC = 2, NC_CREATE_ADHOC = 4, NC_JOIN_ADHOC = 5 };
+#define UTILITY_INVALID_STATUS 0x80110001u
+#define NC_RESULT_FAILED       1u   /* common.result for an action not done here */
+
+static int      g_nc_status;
+static uint32_t g_nc_param;
+static int      g_nc_adhoc;         /* this dialog is joining a group */
+
+static void hle_NetconfInitStart(void) {
+    if (g_nc_status != NC_NONE) { psp_ret(UTILITY_INVALID_STATUS); return; }
+    uint32_t p = psp_arg(0);
+    if (!p) { psp_ret(CTL_INVALID_ARG); return; }
+    const int action = (int)psp_read32(p + 48);
+    const uint32_t adhoc = psp_read32(p + 52);
+    char group[MHN_GROUP_LEN + 1];
+    memset(group, 0, sizeof group);
+    if (adhoc) for (int i = 0; i < MHN_GROUP_LEN; i++) group[i] = (char)psp_read8(adhoc + (uint32_t)i);
+    g_nc_param = p;
+    g_nc_status = NC_INIT;
+    g_nc_adhoc = action == NC_CONNECT_ADHOC || action == NC_CREATE_ADHOC || action == NC_JOIN_ADHOC;
+    printf("netconf: action %d, group \"%s\"%s\n", action, group, g_nc_adhoc ? "" : " (not an ad hoc action)");
+    if (g_nc_adhoc) {
+        if (!g_ctl_inited) { g_ctl_inited = 1; g_state = ST_DISCONNECTED; }
+        if (g_state != ST_CONNECTED) connect_group(group);
+    }
+    psp_ret(0);
+}
+
+static void hle_NetconfGetStatus(void) {
+    const int s = g_nc_status;
+    if (s == NC_INIT) g_nc_status = NC_RUNNING;
+    else if (s == NC_RUNNING && (!g_nc_adhoc || g_state == ST_CONNECTED)) {
+        psp_write32(g_nc_param + 28, g_nc_adhoc ? 0 : NC_RESULT_FAILED);   /* common.result */
+        g_nc_status = NC_FINISHED;
+    } else if (s == NC_SHUTDOWN) g_nc_status = NC_NONE;
+    psp_ret((uint32_t)s);
+}
+
+static void hle_NetconfUpdate(void) { psp_ret(0); }
+
+static void hle_NetconfShutdownStart(void) {
+    if (g_nc_status != NC_FINISHED && g_nc_status != NC_RUNNING) { psp_ret(UTILITY_INVALID_STATUS); return; }
+    g_nc_status = NC_SHUTDOWN;
+    psp_ret(0);
+}
+
 /* ---- handlers ---- */
 
 static void call_handlers(int event, int error) {
@@ -761,6 +820,12 @@ void mhfu_adhoc_register(void) {
     psp_hle_register(0x7A662D6B, "sceNetAdhoc", "sceNetAdhocPollSocket", hle_PollSocket);
     psp_hle_register(0x73BFD52D, "sceNetAdhoc", "sceNetAdhocSetSocketAlert", hle_SetSocketAlert);
     psp_hle_register(0x4D2CE199, "sceNetAdhoc", "sceNetAdhocGetSocketAlert", hle_GetSocketAlert);
+
+    psp_hle_register(0x4DB1E739, "sceUtility", "sceUtilityNetconfInitStart", hle_NetconfInitStart);
+    psp_hle_register(0x6332AA39, "sceUtility", "sceUtilityNetconfGetStatus", hle_NetconfGetStatus);
+    psp_hle_register(0x91E70E35, "sceUtility", "sceUtilityNetconfUpdate", hle_NetconfUpdate);
+    psp_hle_register(0xF88155F6, "sceUtility", "sceUtilityNetconfShutdownStart", hle_NetconfShutdownStart);
+    g_nc_status = NC_NONE;
 
     psp_hle_register(0xE26F226E, "sceNetAdhocctl", "sceNetAdhocctlInit", hle_CtlInit);
     psp_hle_register(0x9D689E13, "sceNetAdhocctl", "sceNetAdhocctlTerm", hle_CtlTerm);
