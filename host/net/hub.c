@@ -389,7 +389,7 @@ static void handle(mhn_hub *h, client *c, int type, uint8_t *b, uint32_t len) {
         route(h, c, type, b, len);
         break;
     case MHN_CHAT:          chat(h, c, b, len); break;
-    case MHN_PING:          break;
+    case MHN_PING:          if (len >= 8) send_frame(c, MHN_PONG, b, len > 16 ? 16 : len); break;
     default:                break;
     }
 }
