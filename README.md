@@ -35,7 +35,7 @@ switched in when the game loads it; "tested" means someone has played through it
 | Save data | ![80%](https://img.shields.io/badge/80%25-brightgreen?style=flat-square) | save and load work (unencrypted) |
 | Multiplayer (ad hoc over rooms) | ![75%](https://img.shields.io/badge/75%25-yellow?style=flat-square) | two players in one room: Online Gathering Hall and a quest together work, smooth in quests; movement in the hall lags; internet relay untested |
 | Gameplay coverage | ![40%](https://img.shields.io/badge/40%25-yellow?style=flat-square) | village life and a full quest (out, region changes, back) work; the Gathering Hall, more maps and monsters untested |
-| PC release (launcher) | ![0%](https://img.shields.io/badge/0%25-lightgrey?style=flat-square) | after the game works end to end |
+| PC release (launcher) | ![40%](https://img.shields.io/badge/40%25-yellow?style=flat-square) | launcher works (play, profiles, keys, controllers, achievements view, updates, log); no installer or release yet |
 | Android port | ![0%](https://img.shields.io/badge/0%25-lightgrey?style=flat-square) | NDK + SDL3, touch buttons, GLES renderer |
 
 ## Layout
@@ -43,6 +43,7 @@ switched in when the game loads it; "tested" means someone has played through it
 | Path | What |
 |---|---|
 | `psprecomp/` | toolkit, as a git submodule |
+| `launcher/` | the launcher (`mhfu_launcher.exe`): ready check, profiles, display settings, keyboard and controller setup, RetroAchievements, updates, log |
 | `host/main.c` | desktop bring-up host: loads the EBOOT, sets up the boot thread, runs, reports |
 | `host/hle_mhfu.c` | firmware MHFU needs that psprecomp lacks (UMD, Impose, system params, VTimers) |
 | `host/libfont.c` | sceLibFont: the PSP's PGF system fonts, which MHFU draws all its text with |
@@ -104,6 +105,13 @@ MHFU's text comes from the PSP's own system fonts (`flash0:/font/*.pgf`),
 which are firmware, not part of the game. `setup.ps1` copies them from
 PPSSPP's install (`assets\flash0\font`) to `work/root/flash0/font/`; give
 another folder with `-Fonts <folder>`. Without them the text is blank.
+
+## The launcher
+
+`build\Release\mhfu_launcher.exe` checks the install, then starts the game with
+the chosen profile, upscaler, output size and fullscreen. It also binds keys,
+tests and picks controllers, shows RetroAchievements progress and checks
+GitHub for a newer release. Its settings live in `work/launcher/`.
 
 ## Playing in a window
 
