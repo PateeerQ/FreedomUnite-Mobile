@@ -74,10 +74,11 @@ static void update_fps(void) {
         uint64_t ain, ashort, adrop;
         mhfu_audio_stats(&ain, &ashort, &adrop);
         printf("fps: %.1f over the last %.0f s (vblank waits %.1f/s, controller reads %.1f/s)"
-               "  audio: %.0f frames/s in, %llu short, %llu dropped\n",
+               "  audio: %.0f frames/s in, %llu short, %llu dropped, %.0f ms behind\n",
                (double)(flips - log_flips) / s, s, (double)(psp_display_vblanks() - log_vblanks) / s,
                (double)(mhfu_input_frames() - log_reads) / s, (double)(ain - log_ain) / s,
-               (unsigned long long)(ashort - log_ashort), (unsigned long long)(adrop - log_adrop));
+               (unsigned long long)(ashort - log_ashort), (unsigned long long)(adrop - log_adrop),
+               mhfu_audio_latency_ms());
         log_ain = ain; log_ashort = ashort; log_adrop = adrop;
         /* Ad hoc datagrams, once there are any: how long the game left them
          * waiting is the delay other players see. */

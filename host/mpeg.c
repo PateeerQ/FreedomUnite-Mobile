@@ -24,6 +24,8 @@
  * PS demuxer cannot tell that a PSMF's video stream is H.264; PPSSPP also sets
  * that by hand.) The movie's ATRAC3+ sound is still silence. */
 #include "mpeg.h"
+#include "audio.h"
+#include "hle_mhfu.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -100,6 +102,12 @@ typedef struct {
     AVFrame  *aframe;
     AVPacket *apkt;
     int      afailed;
+    /* Where each stream starts (the first PES PTS, 90 kHz). The sound may
+     * start before the pictures -- 0.59 s in the title movie -- and both are
+     * counted from their own first frame, so that much sound is dropped first
+     * (askip, in ATRAC3+ frames), or it is heard late all the way through. */
+    uint64_t vpts0, apts0;
+    int      have_vpts0, have_apts0, askip_set, askip;
 #endif
 } mpeg_ctx;
 
@@ -263,6 +271,26 @@ static const uint8_t *demux_next(mpeg_ctx *c, size_t *cursor, int audio, size_t 
         *cursor += total;
         const int wanted = audio ? id == 0xBD : id >= 0xE0 && id <= 0xEF;
         if (!wanted || total < 9) continue;
+        if ((p[7] & 0x80) && total >= 14 && !(audio ? c->have_apts0 : c->have_vpts0)) {
+            const uint64_t pts = (uint64_t)(p[9] & 0x0E) << 29 | (uint64_t)p[10] << 22 |
+                                 (uint64_t)(p[11] & 0xFE) << 14 | (uint64_t)p[12] << 7 | p[13] >> 1;
+            if (audio) { c->apts0 = pts; c->have_apts0 = 1; }
+            else       { c->vpts0 = pts; c->have_vpts0 = 1; }
+        }
+        /* MHFU_TRACE_MPEG: each stream's first PTS (90 kHz) and the private
+         * stream's substream ids -- whether sound and pictures start together
+         * and whether there is more than one sound track. */
+        if (getenv("MHFU_TRACE_MPEG") && (p[7] & 0x80) && total >= 14) {
+            static int seen_video, seen_sub[256];
+            const uint64_t pts = (uint64_t)(p[9] & 0x0E) << 29 | (uint64_t)p[10] << 22 |
+                                 (uint64_t)(p[11] & 0xFE) << 14 | (uint64_t)p[12] << 7 | p[13] >> 1;
+            const int sub = audio && 9 + p[8] < total ? p[9 + p[8]] : -1;
+            if (!audio && !seen_video) { seen_video = 1; fprintf(stderr, "mpeg: first video PES 0x%02X pts %llu (%.3f s)\n", id, (unsigned long long)pts, pts / 90000.0); }
+            if (audio && sub >= 0 && !seen_sub[sub]) {
+                seen_sub[sub] = 1;
+                fprintf(stderr, "mpeg: first audio PES substream 0x%02X pts %llu (%.3f s)\n", sub, (unsigned long long)pts, pts / 90000.0);
+            }
+        }
         const size_t start = 9 + p[8] + (audio ? 4 : 0);
         if (start > total) continue;
         *n = total - start;
@@ -385,6 +413,23 @@ static int audio_frame(mpeg_ctx *c, int16_t *out, int max_samples) {
                 memmove(c->aes, c->aes + fs, c->alen - fs);
                 c->alen -= fs;
                 if (!ok) continue;
+                /* Line the sound up with the pictures: drop what plays before
+                 * the first picture, plus the output's own latency (the rings,
+                 * psprecomp's lead, the device, and how far ahead of the
+                 * screen the game decodes its pictures). 1250 ms, set by ear
+                 * on Windows against the title trailer (93 ms left the sound
+                 * clearly late); MHFU_MOVIE_SYNC_MS sets it. */
+                if (!c->askip_set && c->have_apts0 && c->have_vpts0) {
+                    c->askip_set = 1;
+                    const char *env = getenv("MHFU_MOVIE_SYNC_MS");
+                    const double out_s = (env ? atof(env) : 1250.0) / 1000.0;
+                    const double lead_s = c->vpts0 > c->apts0 ? (double)(c->vpts0 - c->apts0) / 90000.0 : 0.0;
+                    const double skip_s = lead_s + out_s;
+                    c->askip = skip_s > 0 ? (int)(skip_s * 44100.0 / 2048.0 + 0.5) : 0;
+                    printf("mpeg: sound starts %.3f s before the pictures, output latency %.0f ms;"
+                           " dropping its first %d frames\n", lead_s, out_s * 1000.0, c->askip);
+                }
+                if (c->askip > 0) { c->askip--; continue; }
                 const AVFrame *f = c->aframe;
                 const int chans = f->ch_layout.nb_channels;
                 const int n = f->nb_samples < max_samples ? f->nb_samples : max_samples;
@@ -761,6 +806,18 @@ static void hle_AtracDecode(void) {
     /* 2048 stereo samples, or silence while there is no frame. */
     if (out && engine_live(c) && !c->afailed) {
         const int n = audio_frame(c, (int16_t *)out, MPEG_ATRAC_OUT_SIZE / 4);
+        if (getenv("MHFU_TRACE_MPEG")) {
+            static int marked;
+            for (int i = 0; i < n * 2 && !marked; i++) {
+                const int v = ((const int16_t *)out)[i];
+                if (v > 64 || v < -64) {
+                    marked = 1;
+                    fprintf(stderr, "mpeg: first audible audio at decode #%u (video frame %u)\n",
+                            c->audio_frame, c->video_frame);
+                    mhfu_audio_mark(mhfu_clock_us());
+                }
+            }
+        }
         static unsigned calls;
         if (getenv("MHFU_TRACE_MPEG") && (calls++ % 100 == 0 || calls < 4)) {
             int peak = 0;
