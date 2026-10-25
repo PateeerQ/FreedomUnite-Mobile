@@ -4,6 +4,8 @@
 # .text for lui/addiu pairs that land on a function start. setup.ps1 adds
 # them to the EBOOT's seeds.
 #   0889F03C  sound VTimer handler (CsePsp, set with SetVTimerHandlerWide)
+#   088AC0E8  sceNetAdhocctl handler (AddHandler on the way into the Online Gathering
+#             Hall; without it the scan-done event never reached the game)
 08816AE4
 08897ED8
 0889A138
@@ -14,3 +16,4 @@
 088C2FD8
 088C3180
 088EFF88
+088AC0E8
