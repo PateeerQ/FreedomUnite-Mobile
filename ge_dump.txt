@@ -1,5 +1,5 @@
-=== run list 526586 at 0x0899CD34 (lists 2299)
-=== list 2299
+=== run list 526078 at 0x0899CD34 (lists 1791)
+=== list 1791
   world 0 0 0 0 1 0 0 0 1 0 0 0
   view  1 0 0 0 1 0 0 0 1 0 0 0
   proj  1.21591 0 0 0 0 2.14569 0 0 0 0 -1 -1 0 0 -60 0
@@ -8,7 +8,7 @@
   sprites x2 vtype 800114 vaddr 0899CD24 fb 00000000/512 CLEAR blend through z1/5/1 tex 0 0922FE50 fmt 5 512x512 fn 0 uvmode 0
     v0 clip (0 0 0 1) -> 0 0 z 65535 w 0 uv 0 0 c 00000000 fog 1
     v1 clip (0 0 0 1) -> 480 272 z 65535 w 0 uv 0 0 c 00000000 fog 1
-=== run list 526587 at 0x08A8C5A8 (lists 2300)
+=== run list 526079 at 0x08A8C5A8 (lists 1792)
   flow J 0x08A8C5AC -> 0x08A8C5B0
   flow J 0x08A8C5B4 -> 0x08ACC698
   flow J 0x08ACC6E0 -> 0x08ACC7B8
@@ -33,7 +33,7 @@
   flow J 0x08A8C62C -> 0x08A8C630
   flow J 0x08A8C634 -> 0x08ACC760
   flow J 0x08ACC77C -> 0x08ACC798
-=== list 2300
+=== list 1792
   sprites x2 vtype 80011C vaddr 08ACC780 fb 00000000/512 blend through z0/0/1 tex 0 0922FE50 fmt 5 512x512 fn 0 uvmode 0
     v0 clip (0 0 0 1) -> 0 0 z 0 w 0 uv 0 0 c FF000000 fog 1
     v1 clip (0 0 0 1) -> 480 272 z 0 w 0 uv 0 0 c FF000000 fog 1
@@ -41,12 +41,12 @@
   flow J 0x08A8C63C -> 0x08ACC728
   flow J 0x08ACC75C -> 0x08A8C640
   flow J 0x08A8C644 -> 0x0899D108
-=== run list 526588 at 0x0899CD64 (lists 2301)
-=== list 2301
+=== run list 526080 at 0x0899CD64 (lists 1793)
+=== list 1793
   sprites x2 vtype 800114 vaddr 0899CD24 fb 00044000/512 CLEAR blend through z1/5/1 tex 0 0922FE50 fmt 5 512x512 fn 0 uvmode 0
     v0 clip (0 0 0 1) -> 0 0 z 65535 w 0 uv 0 0 c 00000000 fog 1
     v1 clip (0 0 0 1) -> 480 272 z 65535 w 0 uv 0 0 c 00000000 fog 1
-=== run list 526589 at 0x08A8C508 (lists 2302)
+=== run list 526081 at 0x08A8C508 (lists 1794)
   flow J 0x08A8C50C -> 0x08A8C510
   flow J 0x08A8C514 -> 0x08A8C698
   flow J 0x08A8C6E0 -> 0x08A8C7B8
@@ -71,7 +71,7 @@
   flow J 0x08A8C58C -> 0x08A8C590
   flow J 0x08A8C594 -> 0x08A8C760
   flow J 0x08A8C77C -> 0x08A8C798
-=== list 2302
+=== list 1794
   sprites x2 vtype 80011C vaddr 08A8C780 fb 00044000/512 blend through z0/0/1 tex 0 0922FE50 fmt 5 512x512 fn 0 uvmode 0
     v0 clip (0 0 0 1) -> 0 0 z 0 w 0 uv 0 0 c FF000000 fog 1
     v1 clip (0 0 0 1) -> 480 272 z 0 w 0 uv 0 0 c FF000000 fog 1
