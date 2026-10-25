@@ -1,0 +1,48 @@
+diff --git a/src/hle/display.c b/src/hle/display.c
+index 29449e8..908a3f5 100644
+--- a/src/hle/display.c
++++ b/src/hle/display.c
+@@ -108,7 +108,11 @@ static volatile uint64_t g_flips, g_flip_last_us, g_flip_max_us;
+ 
+ static uint64_t flip_now_us(void) {
+     struct timespec ts;
++#ifdef _WIN32
+     timespec_get(&ts, TIME_UTC);
++#else
++    clock_gettime(CLOCK_REALTIME, &ts);
++#endif
+     return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+ }
+ 
+diff --git a/src/hle/intrman.c b/src/hle/intrman.c
+index fa7ca6e..b1ed3b2 100644
+--- a/src/hle/intrman.c
++++ b/src/hle/intrman.c
+@@ -55,7 +55,11 @@ static uint64_t  g_vblanks_done;
+ 
+ static long long intr_now_ns(void) {
+     struct timespec ts;
++#ifdef _WIN32
+     timespec_get(&ts, TIME_UTC);
++#else
++    clock_gettime(CLOCK_REALTIME, &ts);
++#endif
+     return (long long)ts.tv_sec * 1000000000ll + ts.tv_nsec;
+ }
+ 
+diff --git a/src/hle/misc.c b/src/hle/misc.c
+index f38c7d3..7ee283c 100644
+--- a/src/hle/misc.c
++++ b/src/hle/misc.c
+@@ -227,7 +227,11 @@ static void hle_OutputPanned(void) {
+ #if PSPRECOMP_REAL_THREADS
+ static uint64_t host_now_us(void) {
+     struct timespec ts;
++#ifdef _WIN32
+     timespec_get(&ts, TIME_UTC);
++#else
++    clock_gettime(CLOCK_REALTIME, &ts);
++#endif
+     return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+ }
+ static uint64_t g_audio_due_us[AUDIO_CHANNELS];
