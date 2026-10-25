@@ -1,0 +1,6 @@
+// FreedomUniteRecomp for Android: the app module builds the repository's own
+// CMakeLists.txt (the recompiled game, psprecomp, SDL3) into libmain.so and
+// wraps it in SDL's Android activity.
+plugins {
+    id 'com.android.application' version '8.7.3' apply false
+}

@@ -1,0 +1,58 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.pateeerq.mhfu'
+    compileSdk 35
+    // The NDK Android Studio installed (SDK Manager > SDK Tools > NDK).
+    ndkVersion project.findProperty('mhfu.ndkVersion') ?: '27.0.12077973'
+
+    defaultConfig {
+        applicationId 'com.pateeerq.mhfu'
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName '0.1.0'
+        externalNativeBuild {
+            cmake {
+                // The repository's CMakeLists.txt: SDL3 static inside libmain.so,
+                // no launcher (the Android one comes later), the SDL window.
+                arguments '-DANDROID_STL=c++_static', '-DMHFU_LAUNCHER=OFF', '-DMHFU_SDL_WINDOW=ON',
+                          '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON'
+                // Optimised even in debug builds: an unoptimised recompiled game is too slow to try.
+                cFlags '-O2'
+                targets 'mhfu_host'
+            }
+        }
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            // Signed with the debug key for now: this APK is for your own phone only.
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file('../../CMakeLists.txt')
+            version '3.22.1+'
+        }
+    }
+
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging true
+        }
+    }
+
+    lint {
+        abortOnError false
+    }
+}
