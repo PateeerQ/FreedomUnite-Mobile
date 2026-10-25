@@ -7,6 +7,7 @@
  * game's timeout (0 means none). */
 #include "adhoc.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -106,6 +107,25 @@ static int wait_for(ready_fn ready, int id, uint32_t timeout_us) {
     }
 }
 
+/* MHFU_TRACE_ADHOC=1: every send, receive and poll with its timeout, result
+ * and wall-clock time, to see what paces the game's network thread. Capped. */
+static int g_trace;
+static void trace(const char *fmt, ...) {
+    static int lines;
+    if (!g_trace || lines++ > 5000) return;
+    va_list ap;
+    va_start(ap, fmt);
+    /* The calling thread, from sceKernelGetThreadId, with the registers kept. */
+    const uint32_t v0 = psp_cpu.r[PSP_REG_V0];
+    psp_hle_call(0x293B45B8u);
+    const uint32_t uid = psp_cpu.r[PSP_REG_V0];
+    psp_cpu.r[PSP_REG_V0] = v0;
+    printf("adhoc %8.1f ms [thread %u]: ", (double)mhfu_clock_us() / 1000.0, uid);
+    vprintf(fmt, ap);
+    printf("\n");
+    va_end(ap);
+}
+
 static void post_local(int event, int error) {
     if (g_nlocal_ev < MAX_LOCAL_EV) {
         g_local_ev[g_nlocal_ev][0] = event;
@@ -187,6 +207,7 @@ static void hle_PdpSend(void) {
     uint8_t *p = guest(data, (uint32_t)len);
     if (len && !p) { psp_ret(ADHOC_INVALID_ARG); return; }
     if (online()) mhn_pdp_send(id, mac, port, p, len);
+    trace("PdpSend id %d to %02X:%02X port %u, %d bytes", id, mac[4], mac[5], port, len);
     psp_ret(0);
 }
 
@@ -202,8 +223,9 @@ static void hle_PdpRecv(void) {
     if (mhn_socket_kind(id) != 1) { psp_ret(ADHOC_INVALID_SOCKET_ID); return; }
     if (!mac_at || !port_at || !len_at) { psp_ret(ADHOC_INVALID_ARG); return; }
     if (!mhn_pdp_next_size(id)) {
-        if (nonblock) { psp_ret(ADHOC_WOULD_BLOCK); return; }
-        if (!wait_for(pdp_ready, id, timeout)) { psp_ret(ADHOC_TIMEOUT); return; }
+        if (nonblock) { trace("PdpRecv id %d: nothing (nonblocking)", id); psp_ret(ADHOC_WOULD_BLOCK); return; }
+        trace("PdpRecv id %d: waiting up to %u us", id, timeout);
+        if (!wait_for(pdp_ready, id, timeout)) { trace("PdpRecv id %d: timed out", id); psp_ret(ADHOC_TIMEOUT); return; }
     }
     int cap = (int)psp_read32(len_at);
     uint8_t mac[6];
@@ -217,6 +239,7 @@ static void hle_PdpRecv(void) {
     write_mac(mac_at, mac);
     psp_write16(port_at, sport);
     psp_write32(len_at, (uint32_t)len);
+    trace("PdpRecv id %d: %d bytes from %02X:%02X", id, len, mac[4], mac[5]);
     psp_ret(0);
 }
 
@@ -443,6 +466,7 @@ static void hle_PollSocket(void) {
     if (!g_poll_sds || g_poll_count <= 0) { psp_ret(ADHOC_INVALID_ARG); return; }
     int n = poll_pass(0);
     if (!n && !nonblock && timeout) n = wait_for(poll_pass, 0, timeout);
+    trace("PollSocket %d sockets, timeout %u us%s -> %d", g_poll_count, timeout, nonblock ? " nonblocking" : "", n);
     psp_ret((uint32_t)n);
 }
 
@@ -794,6 +818,7 @@ void mhfu_adhoc_tick(void) {
 }
 
 void mhfu_adhoc_register(void) {
+    g_trace = getenv("MHFU_TRACE_ADHOC") != NULL;
     psp_hle_register(0x39AF39A6, "sceNet", "sceNetInit", hle_NetInit);
     psp_hle_register(0x281928A9, "sceNet", "sceNetTerm", hle_NetTerm);
     psp_hle_register(0x0BF0A3AE, "sceNet", "sceNetGetLocalEtherAddr", hle_NetGetLocalEtherAddr);
