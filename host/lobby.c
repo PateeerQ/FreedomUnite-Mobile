@@ -198,8 +198,11 @@ void mhfu_lobby_status(char *out, size_t cap) {
     if (!code[0]) { snprintf(out, cap, "Offline"); return; }
     mhn_peer m[MHN_MAX_MEMBERS];
     int n = mhn_client_members(m, MHN_MAX_MEMBERS) + 1;
-    snprintf(out, cap, "Room %s (%s%s), %d player%s", code, g_on_relay ? "internet" : "LAN",
-             g_hub ? ", hosting" : "", n, n == 1 ? "" : "s");
+    const int ms = mhn_client_ping_ms();
+    char ping[24] = "";
+    if (ms >= 0) snprintf(ping, sizeof ping, ", ping %d ms", ms);
+    snprintf(out, cap, "Room %s (%s%s), %d player%s%s", code, g_on_relay ? "internet" : "LAN",
+             g_hub ? ", hosting" : "", n, n == 1 ? "" : "s", ping);
 }
 
 void mhfu_lobby_mac(uint8_t mac[6]) { memcpy(mac, g_mac, 6); }
