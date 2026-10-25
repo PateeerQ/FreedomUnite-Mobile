@@ -4,29 +4,34 @@
  * from guest memory: whatever sceDisplaySetFrameBuf last pointed at, read
  * while the game runs. A frame can tear; for bring-up that does not matter.
  *
- * Keys: W/A/S/D = analog stick (movement), arrows = D-pad, K or Space =
- * Cross, L = Circle, J = Square, I = Triangle, Q = L, E = R, Enter = Start,
- * V or Backspace = Select, F3 = FPS line.
+ * Keys come from input.ini (keys.h; the launcher writes it), by default:
+ * W/A/S/D = analog stick (movement), arrows = D-pad, K or Space = Cross,
+ * L = Circle, J = Square, I = Triangle, Q = L, E = R, Enter = Start, V or
+ * Backspace = Select. F3 = FPS line, F11 or Alt+Enter = fullscreen.
  *
  * The Multiplayer menu is "Create Server" / "Join Server" (lobby.h): the
  * room's code and player count show in the title bar. */
 #include "window.h"
 
-#ifdef _WIN32
+#if defined(_WIN32) && !MHFU_SDL_WINDOW
 
 #include "psprecomp/hle.h"
 #include "psprecomp/mem.h"
 #include "psprecomp/render.h"
 #include "audio.h"
 #include "input.h"
+#include "keys.h"
 #include "lobby.h"
 #include "net/client.h"
+#include "stats.h"
 
 #include <stdio.h>
 #include <string.h>
 
 #define WIN32_LEAN_AND_MEAN
+#define COBJMACROS
 #include <windows.h>
+#include <wincodec.h>
 
 #define PSP_W 480
 #define PSP_H 272
@@ -36,99 +41,62 @@ static volatile LONG g_stick;        /* bit 0 left, 1 right, 2 up, 3 down */
 static volatile LONG g_closed;
 static void        (*g_on_close)(void);
 static int           g_scale = 2;
+static int           g_fullscreen;   /* borderless over the whole monitor */
+static int           g_out_w, g_out_h; /* the window's client size; 0: PSP size times g_scale */
+static WINDOWPLACEMENT g_windowed = { sizeof(WINDOWPLACEMENT) };
+static HMENU         g_menu;
 static uint32_t      g_pixels[PSP_W * PSP_H];
 static int           g_gl;           /* the GL backend presents; WM_PAINT keeps out of its way */
 static HWND          g_main;
 
 static void gl_overlay_text(const char *text);
+static void compose_overlay(void);
+static void toast_lock(void);
+static void toast_unlock(void);
+static int  g_ntoasts;
 
 /* The FPS overlay (F3): frames the game showed per second, and the average
  * and worst frametime, over the last half second. */
 static int    g_show_fps = 1;
 static char   g_fps_text[96] = "FPS --";
 static void update_fps(void) {
-    static uint64_t last_flips;
-    static ULONGLONG last_ms;
-    uint64_t flips, max_us;
-    const ULONGLONG now = GetTickCount64();
-    psp_display_frame_stats(&flips, &max_us);
-    if (last_ms && now > last_ms) {
-        const double dt = (double)(now - last_ms) / 1000.0;
-        const double n = (double)(flips - last_flips);
-        if (n > 0)
-            snprintf(g_fps_text, sizeof g_fps_text, "FPS %.1f   %.1f ms (worst %.1f ms)",
-                     n / dt, dt * 1000.0 / n, (double)max_us / 1000.0);
-        else
-            snprintf(g_fps_text, sizeof g_fps_text, "FPS 0   (no frame for %.1f s)", dt);
-    }
-    /* The log gets the same every 10 seconds, for runs nobody watches. */
-    /* With the vblank waits and controller reads per second too: a game that
-     * runs at the wrong speed shows which clock is off. */
-    static uint64_t log_flips, log_vblanks, log_reads;
-    static ULONGLONG log_ms;
-    if (!log_ms) {
-        log_ms = now; log_flips = flips; log_vblanks = psp_display_vblanks(); log_reads = mhfu_input_frames();
-    } else if (now - log_ms >= 10000) {
-        const double s = (double)(now - log_ms) / 1000.0;
-        static uint64_t log_ain, log_ashort, log_adrop;
-        uint64_t ain, ashort, adrop;
-        mhfu_audio_stats(&ain, &ashort, &adrop);
-        printf("fps: %.1f over the last %.0f s (vblank waits %.1f/s, controller reads %.1f/s)"
-               "  audio: %.0f frames/s in, %llu short, %llu dropped, %.0f ms behind\n",
-               (double)(flips - log_flips) / s, s, (double)(psp_display_vblanks() - log_vblanks) / s,
-               (double)(mhfu_input_frames() - log_reads) / s, (double)(ain - log_ain) / s,
-               (unsigned long long)(ashort - log_ashort), (unsigned long long)(adrop - log_adrop),
-               mhfu_audio_latency_ms());
-        log_ain = ain; log_ashort = ashort; log_adrop = adrop;
-        /* Ad hoc datagrams, once there are any: how long the game left them
-         * waiting is the delay other players see. */
-        static uint64_t log_pin, log_pread, log_pdrop, log_pwait;
-        uint64_t pin, pread, pdrop, pwait, pmax;
-        mhn_pdp_stats(&pin, &pread, &pdrop, &pwait, &pmax);
-        if (pin != log_pin || pread != log_pread)
-            printf("net: PDP %.0f in/s, %.0f read/s, %llu dropped, waited %.0f ms on average (worst %llu ms)\n",
-                   (double)(pin - log_pin) / s, (double)(pread - log_pread) / s,
-                   (unsigned long long)(pdrop - log_pdrop),
-                   pread > log_pread ? (double)(pwait - log_pwait) / (double)(pread - log_pread) : 0.0,
-                   (unsigned long long)pmax);
-        log_pin = pin; log_pread = pread; log_pdrop = pdrop; log_pwait = pwait;
-        fflush(stdout);
-        log_ms = now;
-        log_flips = flips;
-        log_vblanks = psp_display_vblanks();
-        log_reads = mhfu_input_frames();
-    }
-    last_flips = flips;
-    last_ms = now;
+    mhfu_stats_tick(GetTickCount64(), g_fps_text, sizeof g_fps_text);
     if (g_gl) gl_overlay_text(g_show_fps ? g_fps_text : NULL);
 }
 
-static uint32_t key_button(WPARAM k) {
-    switch (k) {
-    case VK_UP:    return PSP_CTRL_UP;
-    case VK_DOWN:  return PSP_CTRL_DOWN;
-    case VK_LEFT:  return PSP_CTRL_LEFT;
-    case VK_RIGHT: return PSP_CTRL_RIGHT;
-    case 'K':      case VK_SPACE:  return PSP_CTRL_CROSS;
-    case 'L':      return PSP_CTRL_CIRCLE;
-    case 'J':      return PSP_CTRL_SQUARE;
-    case 'I':      return PSP_CTRL_TRIANGLE;
-    case 'Q':      return PSP_CTRL_LTRIGGER;
-    case 'E':      return PSP_CTRL_RTRIGGER;
-    case VK_RETURN: return PSP_CTRL_START;
-    case 'V':      case VK_BACK:   return PSP_CTRL_SELECT;
-    default:       return 0;
+/* The key as input.ini names it: Shift, Ctrl and Alt as left or right. */
+static unsigned real_vk(WPARAM wp, LPARAM lp) {
+    const UINT scan = (UINT)(lp >> 16) & 0xFF;
+    const int ext = (lp >> 24) & 1;
+    switch (wp) {
+    case VK_SHIFT:   return MapVirtualKeyA(scan, MAPVK_VSC_TO_VK_EX);
+    case VK_CONTROL: return ext ? VK_RCONTROL : VK_LCONTROL;
+    case VK_MENU:    return ext ? VK_RMENU : VK_LMENU;
+    default:         return (unsigned)wp;
     }
 }
 
-static LONG key_stick(WPARAM k) {
-    switch (k) {
-    case 'A': return 1;
-    case 'D': return 2;
-    case 'W': return 4;
-    case 'S': return 8;
-    default:  return 0;
+static uint32_t key_button(WPARAM wp, LPARAM lp) { return mhfu_keys_buttons(real_vk(wp, lp)); }
+static LONG     key_stick(WPARAM wp, LPARAM lp)  { return mhfu_keys_stick(real_vk(wp, lp)); }
+
+/* Borderless over the monitor the window is on, without the menu (the
+ * Multiplayer menu comes back with the window). */
+static void set_fullscreen(HWND h, int on) {
+    if (on) {
+        GetWindowPlacement(h, &g_windowed);
+        MONITORINFO mi = { sizeof mi };
+        GetMonitorInfoA(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &mi);
+        SetMenu(h, NULL);
+        SetWindowLongA(h, GWL_STYLE, WS_POPUP | WS_VISIBLE);
+        SetWindowPos(h, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right - mi.rcMonitor.left,
+                     mi.rcMonitor.bottom - mi.rcMonitor.top, SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
+    } else {
+        SetWindowLongA(h, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
+        SetMenu(h, g_menu);
+        SetWindowPlacement(h, &g_windowed);
+        SetWindowPos(h, NULL, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER);
     }
+    g_fullscreen = on;
 }
 
 /* The framebuffer, converted to the 32-bit BGRX a DIB wants. */
@@ -164,6 +132,7 @@ enum {
 };
 #define WM_LOBBY_DONE (WM_APP + 1)
 #define WM_ROOMS_DONE (WM_APP + 2)
+#define WM_TOAST      (WM_APP + 4)
 
 static volatile LONG g_lobby_busy;
 static char          g_lobby_err[256];
@@ -483,20 +452,37 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (g_gl) gl_overlay_text(g_show_fps ? g_fps_text : NULL);
             return 0;
         }
-        InterlockedOr(&g_buttons, (LONG)key_button(wp));
-        InterlockedOr(&g_stick, key_stick(wp));
+        if (!(lp & (1 << 30)) && (wp == VK_F11 || (wp == VK_RETURN && msg == WM_SYSKEYDOWN))) {
+            set_fullscreen(h, !g_fullscreen);
+            return 0;
+        }
+        InterlockedOr(&g_buttons, (LONG)key_button(wp, lp));
+        InterlockedOr(&g_stick, key_stick(wp, lp));
         return 0;
     case WM_KEYUP: case WM_SYSKEYUP:
-        InterlockedAnd(&g_buttons, ~(LONG)key_button(wp));
-        InterlockedAnd(&g_stick, ~key_stick(wp));
+        InterlockedAnd(&g_buttons, ~(LONG)key_button(wp, lp));
+        InterlockedAnd(&g_stick, ~key_stick(wp, lp));
         return 0;
+    case WM_SYSCHAR:
+        return 0;                        /* no beep for Alt+Enter */
     case WM_KILLFOCUS:
         InterlockedExchange(&g_buttons, 0);
         InterlockedExchange(&g_stick, 0);
         return 0;
+    case WM_TOAST:
+        SetTimer(h, 4, 16, NULL);
+        return 0;
     case WM_TIMER:
         if (wp == 2) { if (!g_lobby_busy) update_title(); return 0; }
         if (wp == 3) { update_fps(); return 0; }
+        if (wp == 4) {                   /* a toast is moving */
+            compose_overlay();
+            toast_lock();
+            const int idle = !g_ntoasts;
+            toast_unlock();
+            if (idle) KillTimer(h, 4);
+            return 0;
+        }
         if (!g_gl) InvalidateRect(h, NULL, FALSE);
         return 0;
     case WM_PAINT: {
@@ -543,6 +529,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 
 static DWORD WINAPI window_thread(LPVOID arg) {
     HANDLE ready = (HANDLE)arg;
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);   /* WIC, for the toasts' badges */
     WNDCLASSA wc;
     memset(&wc, 0, sizeof wc);
     wc.style = CS_OWNDC;                 /* one DC for the life of the window, for GL */
@@ -552,16 +539,17 @@ static DWORD WINAPI window_thread(LPVOID arg) {
     wc.lpszClassName = "mhfu_host";
     RegisterClassA(&wc);
 
-    RECT r = { 0, 0, PSP_W * g_scale, PSP_H * g_scale };
+    RECT r = { 0, 0, g_out_w > 0 ? g_out_w : PSP_W * g_scale, g_out_h > 0 ? g_out_h : PSP_H * g_scale };
     DWORD style = WS_OVERLAPPEDWINDOW;
-    HMENU menu = make_menu();
+    g_menu = make_menu();
     AdjustWindowRect(&r, style, TRUE);
     HWND h = CreateWindowA("mhfu_host", "MHFU (recompiled)", style, CW_USEDEFAULT, CW_USEDEFAULT,
-                           r.right - r.left, r.bottom - r.top, NULL, menu, wc.hInstance, NULL);
+                           r.right - r.left, r.bottom - r.top, NULL, g_menu, wc.hInstance, NULL);
     g_main = h;
     SetEvent(ready);
     if (!h) { InterlockedExchange(&g_closed, 1); return 1; }
     ShowWindow(h, SW_SHOW);
+    if (g_fullscreen) set_fullscreen(h, 1);
     SetTimer(h, 1, 16, NULL);
     SetTimer(h, 2, 2000, NULL);      /* the title's player count */
     SetTimer(h, 3, 500, NULL);       /* the FPS overlay */
@@ -577,6 +565,13 @@ static DWORD WINAPI window_thread(LPVOID arg) {
     }
     if (g_on_close) g_on_close();
     return 0;
+}
+
+void mhfu_window_options(int fullscreen, int out_w, int out_h, const char *keys_ini) {
+    g_fullscreen = fullscreen;
+    g_out_w = out_w;
+    g_out_h = out_h;
+    mhfu_keys_load(keys_ini);
 }
 
 int mhfu_window_start(int scale) {
@@ -661,13 +656,187 @@ static void gl_size(void *user, int *w, int *h) {
 }
 
 /* The FPS line as an image for the GL overlay: GDI text on a black box. */
-static void gl_overlay_text(const char *text) {
-    if (!text) { psp_render_gl_overlay(NULL, 0, 0); return; }
+/* ---- the overlay: the FPS line and achievement toasts ----
+ *
+ * psprecomp draws one image over the top-left corner of the frame, at window
+ * pixels. With a toast showing, that image is as wide as the window: the FPS
+ * line on the left, the toast's card on the right, transparent between. */
+
+#define TOAST_W     440
+#define TOAST_H     116
+#define TOAST_MAX   8
+#define TOAST_IN_MS 320
+#define TOAST_ON_MS 5200
+
+typedef struct {
+    char head[64], title[256], text[512], badge[700];
+} toast;
+
+static CRITICAL_SECTION g_toast_lock;
+static volatile LONG    g_toast_lock_state;  /* 0 new, 1 being set up, 2 ready */
+static toast            g_toasts[TOAST_MAX];
+static int              g_ntoasts;
+static ULONGLONG        g_toast_t0;          /* when the showing one started; 0: none */
+static uint32_t        *g_badge;             /* the showing toast's badge, BGRA */
+static int              g_badge_w, g_badge_h, g_badge_loaded;
+static const char      *g_fps_shown;         /* what gl_overlay_text was last given */
+
+static void toast_lock(void) {
+    if (InterlockedCompareExchange(&g_toast_lock_state, 1, 0) == 0) {
+        InitializeCriticalSection(&g_toast_lock);
+        InterlockedExchange(&g_toast_lock_state, 2);
+    }
+    while (g_toast_lock_state != 2) Sleep(0);
+    EnterCriticalSection(&g_toast_lock);
+}
+static void toast_unlock(void) { LeaveCriticalSection(&g_toast_lock); }
+
+/* A PNG into BGRA through WIC; NULL if it cannot be read. */
+static uint32_t *load_png(const char *path, int *w, int *h) {
+    wchar_t wp[700];
+    if (!MultiByteToWideChar(CP_UTF8, 0, path, -1, wp, 700)) return NULL;
+    IWICImagingFactory *f = NULL;
+    IWICBitmapDecoder *dec = NULL;
+    IWICBitmapFrameDecode *fr = NULL;
+    IWICFormatConverter *cv = NULL;
+    uint32_t *px = NULL;
+    if (SUCCEEDED(CoCreateInstance(&CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER, &IID_IWICImagingFactory, (void **)&f)) &&
+        SUCCEEDED(IWICImagingFactory_CreateDecoderFromFilename(f, wp, NULL, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &dec)) &&
+        SUCCEEDED(IWICBitmapDecoder_GetFrame(dec, 0, &fr)) && SUCCEEDED(IWICImagingFactory_CreateFormatConverter(f, &cv)) &&
+        SUCCEEDED(IWICFormatConverter_Initialize(cv, (IWICBitmapSource *)fr, &GUID_WICPixelFormat32bppBGRA,
+                                                 WICBitmapDitherTypeNone, NULL, 0.0, WICBitmapPaletteTypeCustom))) {
+        UINT uw = 0, uh = 0;
+        IWICFormatConverter_GetSize(cv, &uw, &uh);
+        px = uw && uh ? (uint32_t *)malloc((size_t)uw * uh * 4) : NULL;
+        if (px && FAILED(IWICFormatConverter_CopyPixels(cv, NULL, uw * 4, uw * uh * 4, (BYTE *)px))) { free(px); px = NULL; }
+        *w = (int)uw;
+        *h = (int)uh;
+    }
+    if (cv) IWICFormatConverter_Release(cv);
+    if (fr) IWICBitmapFrameDecode_Release(fr);
+    if (dec) IWICBitmapDecoder_Release(dec);
+    if (f) IWICImagingFactory_Release(f);
+    return px;
+}
+
+static HFONT font(int px, int weight, const wchar_t *face) {
+    return CreateFontW(-px, 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                       ANTIALIASED_QUALITY, DEFAULT_PITCH, face);
+}
+
+static void text_utf8(HDC dc, const char *s, RECT *r, UINT flags) {
+    wchar_t w[600];
+    if (MultiByteToWideChar(CP_UTF8, 0, s, -1, w, 600)) DrawTextW(dc, w, -1, r, flags | DT_NOPREFIX);
+}
+
+/* The card: dark wood, a brass double border, the badge in a gold frame,
+ * the kind of news in gold, the title, the description. */
+static void draw_card(HDC dc, int x, int y, const toast *t) {
+    const COLORREF gold = RGB(236, 194, 104), brass = RGB(126, 98, 54);
+    RECT r = { x, y, x + TOAST_W, y + TOAST_H };
+    HBRUSH bg = CreateSolidBrush(RGB(30, 23, 17));
+    FillRect(dc, &r, bg);
+    DeleteObject(bg);
+    HPEN pg = CreatePen(PS_SOLID, 2, gold), pb = CreatePen(PS_SOLID, 1, brass);
+    HGDIOBJ op = SelectObject(dc, pg), ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
+    Rectangle(dc, x + 1, y + 1, x + TOAST_W, y + TOAST_H);
+    SelectObject(dc, pb);
+    Rectangle(dc, x + 5, y + 5, x + TOAST_W - 4, y + TOAST_H - 4);
+    /* The badge, or a gold diamond when there is none. */
+    const int bx = x + 20, by = y + (TOAST_H - 64) / 2, bs = 64;
+    if (g_badge) {
+        BITMAPINFO bi;
+        memset(&bi, 0, sizeof bi);
+        bi.bmiHeader.biSize = sizeof bi.bmiHeader;
+        bi.bmiHeader.biWidth = g_badge_w;
+        bi.bmiHeader.biHeight = -g_badge_h;
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        SetStretchBltMode(dc, HALFTONE);
+        StretchDIBits(dc, bx, by, bs, bs, 0, 0, g_badge_w, g_badge_h, g_badge, &bi, DIB_RGB_COLORS, SRCCOPY);
+    } else {
+        HBRUSH gb = CreateSolidBrush(gold);
+        const POINT d[4] = { { bx + bs / 2, by + 6 }, { bx + bs - 6, by + bs / 2 }, { bx + bs / 2, by + bs - 6 }, { bx + 6, by + bs / 2 } };
+        SelectObject(dc, gb);
+        SelectObject(dc, GetStockObject(NULL_PEN));
+        Polygon(dc, d, 4);
+        SelectObject(dc, GetStockObject(NULL_BRUSH));
+        DeleteObject(gb);
+    }
+    SelectObject(dc, pg);
+    SelectObject(dc, GetStockObject(NULL_BRUSH));
+    Rectangle(dc, bx - 2, by - 2, bx + bs + 2, by + bs + 2);
+    SelectObject(dc, op);
+    SelectObject(dc, ob);
+    DeleteObject(pg);
+    DeleteObject(pb);
+
+    SetBkMode(dc, TRANSPARENT);
+    const int tx = bx + bs + 18, tw = x + TOAST_W - 16 - tx;
+    HFONT fh = font(12, FW_BOLD, L"Segoe UI"), ft = font(19, FW_SEMIBOLD, L"Segoe UI"), fd = font(14, FW_NORMAL, L"Segoe UI");
+    HGDIOBJ of = SelectObject(dc, fh);
+    SetTextColor(dc, gold);
+    RECT rh = { tx, y + 16, tx + tw, y + 32 };
+    text_utf8(dc, t->head, &rh, DT_SINGLELINE | DT_END_ELLIPSIS);
+    SelectObject(dc, ft);
+    SetTextColor(dc, RGB(252, 247, 237));
+    RECT rt = { tx, y + 32, tx + tw, y + 58 };
+    text_utf8(dc, t->title, &rt, DT_SINGLELINE | DT_END_ELLIPSIS);
+    SelectObject(dc, fd);
+    SetTextColor(dc, RGB(205, 192, 168));
+    RECT rd = { tx, y + 59, tx + tw, y + TOAST_H - 8 };
+    text_utf8(dc, t->text, &rd, DT_WORDBREAK | DT_END_ELLIPSIS | DT_EDITCONTROL);
+    SelectObject(dc, of);
+    DeleteObject(fh);
+    DeleteObject(ft);
+    DeleteObject(fd);
+}
+
+/* How far the showing toast has slid in (0..1): 1 while one shows, 0 for
+ * none, -1 when it is done and the next should start. Under the lock. */
+static int toast_phase(ULONGLONG now, float *in) {
+    if (!g_ntoasts || !g_toast_t0) return 0;
+    const ULONGLONG t = now - g_toast_t0;
+    float f;
+    if (t < TOAST_IN_MS) f = (float)t / TOAST_IN_MS;
+    else if (t < TOAST_IN_MS + TOAST_ON_MS) f = 1;
+    else if (t < TOAST_IN_MS * 2 + TOAST_ON_MS) f = 1 - (float)(t - TOAST_IN_MS - TOAST_ON_MS) / TOAST_IN_MS;
+    else return -1;
+    *in = 1 - (1 - f) * (1 - f) * (1 - f);             /* ease out */
+    return 1;
+}
+
+static void compose_overlay(void) {
+    if (!g_gl) return;
+    const char *text = g_fps_shown;
+    toast_lock();
+    float in = 0;
+    int showing = toast_phase(GetTickCount64(), &in);
+    while (showing < 0) {                              /* the next toast, with its badge */
+        memmove(g_toasts, g_toasts + 1, (size_t)(--g_ntoasts) * sizeof *g_toasts);
+        free(g_badge);
+        g_badge = NULL;
+        g_toast_t0 = g_ntoasts ? GetTickCount64() : 0;
+        g_badge_loaded = 0;
+        showing = toast_phase(GetTickCount64(), &in);
+    }
+    if (showing && !g_badge_loaded) {                  /* decoded here, on the window's thread */
+        g_badge_loaded = 1;
+        if (g_toasts[0].badge[0]) g_badge = load_png(g_toasts[0].badge, &g_badge_w, &g_badge_h);
+    }
+    if (!showing && !text) { toast_unlock(); psp_render_gl_overlay(NULL, 0, 0); return; }
+
     HDC dc = CreateCompatibleDC(NULL);
     HFONT old = (HFONT)SelectObject(dc, GetStockObject(ANSI_FIXED_FONT));
-    SIZE sz;
-    GetTextExtentPoint32A(dc, text, (int)strlen(text), &sz);
-    const int w = sz.cx + 8, h = sz.cy + 4;
+    SIZE sz = { 0, 0 };
+    if (text) GetTextExtentPoint32A(dc, text, (int)strlen(text), &sz);
+    const int fw = text ? sz.cx + 8 : 0, fh = text ? sz.cy + 4 : 0;
+    RECT cr = { 0, 0, 0, 0 };
+    GetClientRect(g_main, &cr);
+    const int w = showing ? (cr.right > fw ? cr.right : fw) : fw;
+    const int h = showing ? (fh > TOAST_H + 24 ? fh : TOAST_H + 24) : fh;
+    const int cx = w - TOAST_W - 20 + (int)((1 - in) * (TOAST_W + 30)), cy = 20;
     BITMAPINFO bi;
     memset(&bi, 0, sizeof bi);
     bi.bmiHeader.biSize = sizeof bi.bmiHeader;
@@ -677,25 +846,57 @@ static void gl_overlay_text(const char *text) {
     bi.bmiHeader.biBitCount = 32;
     bi.bmiHeader.biCompression = BI_RGB;
     void *bits = NULL;
-    HBITMAP bmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+    HBITMAP bmp = w > 0 && h > 0 ? CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, NULL, 0) : NULL;
     if (bmp && bits) {
         HBITMAP oldb = (HBITMAP)SelectObject(dc, bmp);
         memset(bits, 0, (size_t)w * (size_t)h * 4);
         SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, RGB(80, 255, 80));
-        TextOutA(dc, 4, 2, text, (int)strlen(text));
+        if (text) {
+            SetTextColor(dc, RGB(80, 255, 80));
+            TextOutA(dc, 4, 2, text, (int)strlen(text));
+        }
+        if (showing) draw_card(dc, cx, cy, &g_toasts[0]);
         GdiFlush();
         uint32_t *px = (uint32_t *)bits;
-        for (int i = 0; i < w * h; i++) {
-            const uint32_t c = px[i];        /* 0x00RRGGBB */
-            px[i] = (c & 0xFF) << 16 | (c & 0xFF00) | (c >> 16 & 0xFF) | (c ? 0xFF000000u : 0xC0000000u);
-        }
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) {
+                const uint32_t c = px[y * w + x];          /* 0x00RRGGBB */
+                uint32_t a = 0;
+                if (x < fw && y < fh) a = c ? 0xFF : 0xC0;                    /* the FPS box */
+                if (showing && x >= cx && x < cx + TOAST_W && y >= cy && y < cy + TOAST_H) a = 0xF2;
+                px[y * w + x] = (c & 0xFF) << 16 | (c & 0xFF00) | (c >> 16 & 0xFF) | a << 24;
+            }
         psp_render_gl_overlay(px, w, h);
         SelectObject(dc, oldb);
     }
+    toast_unlock();
     if (bmp) DeleteObject(bmp);
     SelectObject(dc, old);
     DeleteDC(dc);
+}
+
+static void gl_overlay_text(const char *text) {
+    g_fps_shown = text;
+    compose_overlay();
+}
+
+void mhfu_window_notify(const char *head, const char *title, const char *text, const char *badge_png) {
+    toast_lock();
+    if (g_ntoasts < TOAST_MAX) {
+        toast *t = &g_toasts[g_ntoasts++];
+        snprintf(t->head, sizeof t->head, "%s", head ? head : "");
+        snprintf(t->title, sizeof t->title, "%s", title ? title : "");
+        snprintf(t->text, sizeof t->text, "%s", text ? text : "");
+        snprintf(t->badge, sizeof t->badge, "%s", badge_png ? badge_png : "");
+        if (g_ntoasts == 1) {
+            g_toast_t0 = GetTickCount64();
+            free(g_badge);
+            g_badge = NULL;
+            g_badge_loaded = 0;          /* compose_overlay decodes it, on the window's thread */
+        }
+    }
+    toast_unlock();
+    if (g_main) PostMessageA(g_main, WM_TOAST, 0, 0);
 }
 
 int mhfu_window_gl(void) {
@@ -720,8 +921,11 @@ uint32_t mhfu_window_buttons(uint8_t *ax, uint8_t *ay) {
     return (uint32_t)g_buttons;
 }
 
-#else  /* !_WIN32 */
+#elif !MHFU_SDL_WINDOW  /* neither window: stubs */
 
+void mhfu_window_options(int fullscreen, int out_w, int out_h, const char *keys_ini) {
+    (void)fullscreen; (void)out_w; (void)out_h; (void)keys_ini;
+}
 int mhfu_window_start(int scale) { (void)scale; return -1; }
 int mhfu_window_gl(void) { return -1; }
 int mhfu_window_closed(void) { return 0; }
@@ -732,5 +936,8 @@ int mhfu_window_ask_text(const char *prompt, const uint16_t *initial, int limit)
     return -1;
 }
 int mhfu_window_text_result(uint16_t *out, int cap) { (void)out; (void)cap; return -2; }
+void mhfu_window_notify(const char *head, const char *title, const char *text, const char *badge_png) {
+    (void)head; (void)title; (void)text; (void)badge_png;
+}
 
 #endif
