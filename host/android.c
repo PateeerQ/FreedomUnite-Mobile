@@ -21,12 +21,14 @@ static void str(JNIEnv *env, jstring s, char *out, size_t cap) {
 }
 
 /* null when it worked, else the message for the player. */
-JNIEXPORT jstring FN(lobbyCreate)(JNIEnv *env, jclass cls, jstring pass) {
+JNIEXPORT jstring FN(lobbyCreate)(JNIEnv *env, jclass cls, jstring pass, jboolean internet) {
     (void)cls;
     char p[16], err[256];
     str(env, pass, p, sizeof p);
-    return mhfu_lobby_create(p, err, sizeof err) == 0 ? NULL : (*env)->NewStringUTF(env, err);
+    return mhfu_lobby_create(p, internet, err, sizeof err) == 0 ? NULL : (*env)->NewStringUTF(env, err);
 }
+
+JNIEXPORT jboolean FN(lobbyHasRelay)(JNIEnv *env, jclass cls) { (void)env; (void)cls; return (jboolean)mhfu_lobby_has_relay(); }
 
 JNIEXPORT jstring FN(lobbyJoin)(JNIEnv *env, jclass cls, jstring code, jstring pass) {
     (void)cls;
