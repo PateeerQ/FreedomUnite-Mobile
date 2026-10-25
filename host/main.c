@@ -35,6 +35,7 @@
 #include "psprecomp/render.h"
 #include "psprecomp/vfpu.h"
 
+#include "about.h"
 #include "achievements.h"
 #include "adhoc.h"
 #include "atrac.h"
@@ -276,6 +277,87 @@ static void on_window_closed(void) {
     _Exit(0);
 }
 
+/* ---- the crash log ----
+ *
+ * On Android a crash keeps the run's log as crash-latest.log, with what
+ * happened on top: the next start offers to copy it, and the menu's "Copy
+ * crash log" does too, so a player can paste it into a report. (On Windows
+ * the launcher keeps it, from the game's exit code.) */
+static char g_log_path[600], g_crash_path[600];
+
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
+
+static void keep_crash_log(const char *why) {
+    if (!g_log_path[0]) return;
+    fflush(stdout);
+    fflush(stderr);
+    FILE *out = fopen(g_crash_path, "wb");
+    if (!out) return;
+    char model[96] = "?", release[32] = "?", when[64] = "?";
+#ifdef __ANDROID__
+    __system_property_get("ro.product.model", model);
+    __system_property_get("ro.build.version.release", release);
+#endif
+    const time_t now = time(NULL);
+    const struct tm *tm = localtime(&now);
+    if (tm) strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S", tm);
+    fprintf(out, "MHFU Recomp %s, Android %s, %s\ncrash: %s\ntime: %s\n\n", MHFU_VERSION, release, model, why, when);
+    FILE *in = fopen(g_log_path, "rb");
+    if (in) {
+        char buf[16384];
+        for (size_t n; (n = fread(buf, 1, sizeof buf, in)) > 0;) fwrite(buf, 1, n, out);
+        fclose(in);
+    }
+    fclose(out);
+}
+
+#ifdef __ANDROID__
+#include <signal.h>
+
+static struct sigaction g_old_sig[NSIG];
+
+/* A host crash (a fault in the host or in a recompiled body): what and where,
+ * the report, the crash log; then Android's own handler, for its tombstone. */
+static void on_signal(int sig, siginfo_t *si, void *uc) {
+    (void)uc;
+    static volatile sig_atomic_t once;
+    if (!once) {
+        once = 1;
+        printf("\nhost crash: signal %d (%s) at address %p\n  guest: last function 0x%08X, ra 0x%08X sp 0x%08X\n",
+               sig, strsignal(sig), si ? si->si_addr : NULL, psp_trace_last(), psp_cpu.r[PSP_REG_RA], psp_cpu.r[PSP_REG_SP]);
+        fflush(stdout);
+        report();
+        char why[96];
+        snprintf(why, sizeof why, "signal %d (%s), guest function 0x%08X", sig, strsignal(sig), psp_trace_last());
+        keep_crash_log(why);
+    }
+    sigaction(sig, &g_old_sig[sig], NULL);
+    raise(sig);
+}
+
+static void crash_handlers(void) {
+    static const int sigs[] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT };
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = on_signal;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigemptyset(&sa.sa_mask);
+    for (size_t i = 0; i < sizeof sigs / sizeof sigs[0]; i++) sigaction(sigs[i], &sa, &g_old_sig[sigs[i]]);
+}
+
+/* The handler's own stack, on the calling thread: a stack overflow (deep
+ * recursion in recompiled code) is reported too. */
+static void crash_altstack(void) {
+    stack_t ss;
+    memset(&ss, 0, sizeof ss);
+    ss.ss_size = 256 * 1024;
+    ss.ss_sp = malloc(ss.ss_size);
+    if (ss.ss_sp) sigaltstack(&ss, NULL);
+}
+#endif
+
 static void on_miss(uint32_t addr) {
     int slot = mhfu_overlay_slot(addr);
     if (slot > 0)
@@ -302,6 +384,9 @@ static void on_miss(uint32_t addr) {
         if (psp_read32(a) == addr) printf(" 0x%08X(sp%+d)", a, (int)(a - sp));
     printf("\n");
     report();
+    char why[64];
+    snprintf(why, sizeof why, "dispatch miss at 0x%08X", addr);
+    keep_crash_log(why);
     exit(1);
 }
 
@@ -385,6 +470,10 @@ static void android_args(int *argc, char ***argv) {
      * write over each other. */
     if (freopen(log, "w", stdout)) dup2(fileno(stdout), fileno(stderr));
     setvbuf(stderr, NULL, _IONBF, 0);
+    snprintf(g_log_path, sizeof g_log_path, "%s", log);
+    snprintf(g_crash_path, sizeof g_crash_path, "%s/crash-latest.log", base);
+    crash_handlers();
+    crash_altstack();                    /* this is the game's thread */
     /* The GL renderer: there is nothing else to see with on the phone. */
     setenv("MHFU_RENDER", "gl", 0);
     snprintf(eboot, sizeof eboot, "%s/ULES01213_EBOOT.BIN", base);
