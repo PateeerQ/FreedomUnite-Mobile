@@ -34,6 +34,8 @@ int  net_udp_recvfrom(net_sock s, void *buf, int cap, uint32_t *ip, uint16_t *po
 int  net_udp_sendto(net_sock s, uint32_t ip, uint16_t port, const void *buf, int len);
 
 int  net_send_all(net_sock s, const void *buf, size_t len);
+/* A send that cannot go out in `ms` fails (and net_send_all with it). */
+void net_set_send_timeout(net_sock s, int ms);
 /* > 0 bytes read, 0 the peer closed, < 0 an error. */
 int  net_recv(net_sock s, void *buf, size_t cap);
 void net_close(net_sock s);

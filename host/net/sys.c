@@ -176,12 +176,29 @@ int net_udp_recvfrom(net_sock s, void *buf, int cap, uint32_t *ip, uint16_t *por
 int net_send_all(net_sock s, const void *buf, size_t len) {
     const char *p = (const char *)buf;
     while (len) {
+#ifdef MSG_NOSIGNAL
+        /* A peer gone mid-send is an error here, not a SIGPIPE that ends the process. */
+        int n = (int)send(s, p, (int)(len > 65536 ? 65536 : len), MSG_NOSIGNAL);
+#else
         int n = (int)send(s, p, (int)(len > 65536 ? 65536 : len), 0);
+#endif
         if (n <= 0) return -1;
         p += n;
         len -= (size_t)n;
     }
     return 0;
+}
+
+void net_set_send_timeout(net_sock s, int ms) {
+#ifdef _WIN32
+    DWORD t = (DWORD)ms;
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char *)&t, sizeof t);
+#else
+    struct timeval t;
+    t.tv_sec = ms / 1000;
+    t.tv_usec = (ms % 1000) * 1000;
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &t, sizeof t);
+#endif
 }
 
 int net_recv(net_sock s, void *buf, size_t cap) {
