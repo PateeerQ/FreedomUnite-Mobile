@@ -133,6 +133,7 @@ endif()
 target_include_directories(mhfu_host PRIVATE "${MHFU_GEN_DIR}" host)
 target_link_libraries(mhfu_host PRIVATE psprecomp mhfu_net)
 if(WIN32)
+    target_sources(mhfu_host PRIVATE assets/icon/mhfu.rc)       # the crest, as the exe's icon
     target_link_libraries(mhfu_host PRIVATE user32 gdi32 opengl32 ole32 windowscodecs)
 endif()
 
