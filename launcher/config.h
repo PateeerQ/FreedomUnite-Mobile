@@ -11,7 +11,8 @@
 #include <string>
 #include <vector>
 
-#define LAUNCHER_VERSION "0.1.0"
+#include "../host/about.h"
+#define LAUNCHER_VERSION MHFU_VERSION
 
 struct Config {
     std::string profile = "Default";
