@@ -80,6 +80,7 @@ static const char *status_text(int st) {
     case MHN_ROOM_FULL:   return "the room is full (16 players)";
     case MHN_BAD_VERSION: return "the server runs a different version";
     case MHN_MAC_IN_USE:  return "this device is already in that room";
+    case MHN_BAD_PASSCODE: return "wrong passcode";
     default:              return "could not reach the server";
     }
 }
@@ -97,10 +98,19 @@ void mhfu_lobby_leave(void) {
     g_on_relay = 0;
 }
 
-int mhfu_lobby_create(char *err, size_t cap) {
+int mhfu_lobby_check_passcode(const char *p) {
+    if (!p || !p[0]) return 0;
+    if (strlen(p) != 4) return -1;
+    for (int i = 0; i < 4; i++) if (!isdigit((unsigned char)p[i])) return -1;
+    return 0;
+}
+
+int mhfu_lobby_create(const char *pass, char *err, size_t cap) {
     mhfu_lobby_leave();
+    if (mhfu_lobby_check_passcode(pass) != 0) { snprintf(err, cap, "A passcode is 4 digits, or empty."); return -1; }
+    if (!pass) pass = "";
     if (g_relay[0]) {
-        int st = mhn_client_start(g_relay, g_relay_port, 1, NULL, g_mac, g_nick);
+        int st = mhn_client_start(g_relay, g_relay_port, 1, NULL, g_mac, g_nick, pass);
         if (st == MHN_OK) { g_on_relay = 1; return 0; }
         snprintf(err, cap, "Relay %s: %s.", g_relay, status_text(st));
         return -1;
@@ -108,12 +118,12 @@ int mhfu_lobby_create(char *err, size_t cap) {
     g_hub = mhn_hub_new(MHN_PORT, 1, 0);
     if (!g_hub) g_hub = mhn_hub_new(0, 1, 0);       /* the usual port is taken: any will do */
     char code[MHN_CODE_LEN];
-    if (!g_hub || mhn_hub_make_room(g_hub, code) != 0 || mhn_hub_start_thread(g_hub) != 0) {
+    if (!g_hub || mhn_hub_make_room(g_hub, code, pass, g_nick) != 0 || mhn_hub_start_thread(g_hub) != 0) {
         stop_hub();
         snprintf(err, cap, "Could not start a server on this device.");
         return -1;
     }
-    int st = mhn_client_start("127.0.0.1", mhn_hub_port(g_hub), 0, code, g_mac, g_nick);
+    int st = mhn_client_start("127.0.0.1", mhn_hub_port(g_hub), 0, code, g_mac, g_nick, pass);
     if (st != MHN_OK) {
         stop_hub();
         snprintf(err, cap, "The server on this device did not answer.");
@@ -122,8 +132,31 @@ int mhfu_lobby_create(char *err, size_t cap) {
     return 0;
 }
 
-int mhfu_lobby_join(const char *code_in, char *err, size_t cap) {
+int mhfu_lobby_list(mhfu_room *out, int max) {
+    static mhn_room_info found[MHN_LIST_MAX];
+    int n = mhn_lan_list(found, MHN_LIST_MAX, 900);
+    if (g_relay[0]) {
+        const int k = mhn_hub_list(g_relay, g_relay_port, found + n, MHN_LIST_MAX - n, 3000);
+        if (k > 0) n += k;
+    }
+    int w = 0;
+    for (int i = 0; i < n && w < max; i++) {
+        int dup = 0;                     /* a relay room seen on the LAN too */
+        for (int k = 0; k < w; k++) dup |= !strcmp(out[k].code, found[i].code);
+        if (dup) continue;
+        memcpy(out[w].code, found[i].code, sizeof out[w].code);
+        snprintf(out[w].name, sizeof out[w].name, "%s", found[i].name);
+        out[w].players = found[i].players;
+        out[w].locked = found[i].locked;
+        out[w].internet = found[i].relay;
+        w++;
+    }
+    return w;
+}
+
+int mhfu_lobby_join(const char *code_in, const char *pass, char *err, size_t cap) {
     mhfu_lobby_leave();
+    if (!pass) pass = "";
     /* Accept "4k7q", "mh4k7q" or "MH-4K7Q". */
     char code[MHN_CODE_LEN], raw[16];
     size_t n = 0;
@@ -137,12 +170,12 @@ int mhfu_lobby_join(const char *code_in, char *err, size_t cap) {
     char host[64];
     uint16_t port;
     if (mhn_lan_find(code, host, sizeof host, &port, 1500) == 0) {
-        int st = mhn_client_start(host, port, 0, code, g_mac, g_nick);
+        int st = mhn_client_start(host, port, 0, code, g_mac, g_nick, pass);
         if (st == MHN_OK) return 0;
         if (st != -1) { snprintf(err, cap, "%s: %s.", code, status_text(st)); return -1; }
     }
     if (g_relay[0]) {
-        int st = mhn_client_start(g_relay, g_relay_port, 0, code, g_mac, g_nick);
+        int st = mhn_client_start(g_relay, g_relay_port, 0, code, g_mac, g_nick, pass);
         if (st == MHN_OK) { g_on_relay = 1; return 0; }
         snprintf(err, cap, "%s: %s.", code, status_text(st));
         return -1;

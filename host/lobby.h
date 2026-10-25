@@ -22,11 +22,30 @@
  * are not saved: `mac` as "02:AA:BB:CC:DD:EE". */
 void mhfu_lobby_init(const char *dir, const char *nick, const char *mac, const char *relay);
 
-/* Both block for a few seconds at most; run them off the UI thread. They
- * return 0, or -1 with a message for the player in `err`. */
-int  mhfu_lobby_create(char *err, size_t cap);
-int  mhfu_lobby_join(const char *code, char *err, size_t cap);
+/* All of these block for a few seconds at most; run them off the UI thread.
+ * create and join return 0, or -1 with a message for the player in `err`.
+ *
+ * Rooms work as Monster Hunter's online lobbies do: every open room is listed
+ * (who hosts it, how many are in), and a room may have a 4-digit passcode
+ * that joining it asks for. The code (MH-4K7Q) still joins directly. */
+int  mhfu_lobby_create(const char *passcode, char *err, size_t cap);   /* "" or NULL: no passcode */
+int  mhfu_lobby_join(const char *code, const char *passcode, char *err, size_t cap);
 void mhfu_lobby_leave(void);
+
+typedef struct {
+    char code[8];           /* "MH-4K7Q" */
+    char name[32];          /* "Fathir's room" */
+    int  players;
+    int  locked;            /* has a passcode */
+    int  internet;          /* on the relay, rather than this network */
+} mhfu_room;
+
+/* The rooms on this network and on the relay (if one is set); how many were
+ * written. Takes about a second: it waits for hubs on the LAN to answer. */
+int  mhfu_lobby_list(mhfu_room *out, int max);
+
+/* A passcode as typed: "" is fine, else exactly 4 digits. 0 if acceptable. */
+int  mhfu_lobby_check_passcode(const char *passcode);
 
 /* One line for a title bar or a banner: "Room MH-4K7Q (LAN), 2 players". */
 void mhfu_lobby_status(char *out, size_t cap);
