@@ -1,0 +1,3 @@
+# game_task.ovl (C5DF3522), slot 1.
+# Functions only reached through a pointer built at run time (dispatch misses).
+09B6A028
