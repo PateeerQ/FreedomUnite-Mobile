@@ -20,6 +20,7 @@
 #include <windows.h>
 #endif
 
+#include "achievements.h"
 #include "gamepad.h"
 #include "input.h"
 #include "window.h"
@@ -47,7 +48,11 @@ static int      g_pacing;
 
 static long long wall_ns(void) {
     struct timespec ts;
+#ifdef _WIN32
     timespec_get(&ts, TIME_UTC);
+#else
+    clock_gettime(CLOCK_REALTIME, &ts);
+#endif
     return (long long)ts.tv_sec * 1000000000ll + ts.tv_nsec;
 }
 
@@ -138,6 +143,7 @@ static void hle_ReadBufferPositive(void) {
 
     if (g_pacing) pace();
     uint64_t frame = g_frame++;
+    mhfu_ach_frame();                    /* RetroAchievements: once a game frame */
     uint8_t ax = 128, ay = 128;
     uint32_t buttons = script_buttons(frame) | mhfu_window_buttons(&ax, &ay);
     buttons |= mhfu_gamepad_read(&ax, &ay);
