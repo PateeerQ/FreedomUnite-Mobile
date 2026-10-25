@@ -21,9 +21,11 @@
 #include <stdint.h>
 #include <string.h>
 
-#define MHN_MAGIC        0x314E484Du   /* "MHN1" */
+#define MHN_MAGIC        0x324E484Du   /* "MHN2": rooms have a name and maybe a passcode */
 #define MHN_PORT         27313         /* hub TCP port; LAN discovery is UDP on the same number */
 #define MHN_CODE_LEN     8             /* "MH-4K7Q" plus NUL */
+#define MHN_PASS_LEN     8             /* a room's passcode, 4 digits as in Monster Hunter; "" for none */
+#define MHN_NAME_LEN     32            /* a room's name in the list: "Fathir's room" */
 #define MHN_NICK_LEN     128           /* SceNetAdhocctlNickname */
 #define MHN_GROUP_LEN    8             /* SceNetAdhocctlGroupName */
 #define MHN_MAX_FRAME    (70 * 1024)   /* PDP's largest datagram is 65523 */
@@ -31,10 +33,14 @@
 
 enum {
     /* client -> hub */
-    MHN_HELLO = 1,          /* u32 magic, u8 create, char code[8], u8 mac[6], char nick[128] */
+    MHN_HELLO = 1,          /* u32 magic, u8 create, char code[8], u8 mac[6], char nick[128], char pass[8]:
+                             * a create sets the room's passcode, a join must match it */
     /* hub -> client */
     MHN_WELCOME = 2,        /* u32 status, char code[8] */
     MHN_MEMBER = 3,         /* u8 joined, u8 mac[6], char nick[128]: someone entered or left the room */
+    /* the room list: instead of a HELLO, then the hub answers and the client hangs up */
+    MHN_LIST = 4,           /* c->h, no body */
+    MHN_ROOM_LIST = 5,      /* h->c: u32 n, n x room entry (below) */
 
     /* adhocctl: the game's own groups inside the room */
     MHN_CTL_CONNECT = 10,   /* c->h: char group[8]. Create, Connect and Join all mean "be in this group" */
@@ -63,7 +69,14 @@ enum {
     MHN_ROOM_FULL = 2,
     MHN_BAD_VERSION = 3,
     MHN_MAC_IN_USE = 4,
+    MHN_BAD_PASSCODE = 5,
 };
+
+/* A room in a list: char code[8], char name[32], u8 players, u8 locked. The
+ * LAN form: a UDP "MHNL" broadcast, answered by every hub with "MHNR", u16
+ * its TCP port, u8 n, then n of these. */
+#define MHN_ENTRY_LEN (MHN_CODE_LEN + MHN_NAME_LEN + 2)
+#define MHN_LIST_MAX  64
 
 #define MHN_ADDR_LEN 16     /* the src/sport/dst/dport header of traffic frames */
 
