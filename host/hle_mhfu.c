@@ -159,6 +159,8 @@ static uint64_t g_vt_fired;
 
 uint64_t mhfu_vtimer_fired(void) { return g_vt_fired; }
 
+static int trace_vt(void);
+
 static vtimer *find_vt(uint32_t uid) {
     uint32_t i = uid - VTIMER_UID_BASE;
     return (i < MAX_VTIMERS && g_vt[i].used) ? &g_vt[i] : NULL;
@@ -166,7 +168,11 @@ static vtimer *find_vt(uint32_t uid) {
 
 uint64_t mhfu_clock_us(void) {
     struct timespec ts;
+#ifdef _WIN32
     timespec_get(&ts, TIME_UTC);
+#else
+    clock_gettime(CLOCK_REALTIME, &ts);
+#endif
     static uint64_t start;
     uint64_t t = (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
     if (!start) start = t;
