@@ -1,0 +1,2 @@
+// The crest (tools/make_icon.py): resource 1, which the windows take as their icon.
+1 ICON "mhfu.ico"
