@@ -60,12 +60,14 @@ enum {
     MHN_PTP_DATA = 24,
     MHN_PTP_FIN = 25,       /* closed */
 
-    MHN_PING = 30,          /* either way, no body: keeps NATs and idle sockets alive */
+    MHN_PING = 30,          /* either way: keeps NATs and idle sockets alive. A body (u64 the sender's
+                             * clock, ms) asks the hub for a PONG with the same body: the round trip */
 
     /* The room's chat (MHFU has none of its own; Select opens it, chat.c).
      * Hubs that predate it ignore it, as they ignore any type they do not know. */
     MHN_CHAT = 31,          /* c->h: UTF-8 text, 1..MHN_CHAT_MAX bytes, no NUL.
                              * h->c: u8 mac[6], char nick[128], then the text: to everyone else in the room */
+    MHN_PONG = 32,          /* h->c: a PING's body, back at once (hubs before it send none: no ping shown) */
 };
 
 #define MHN_CHAT_MAX     200           /* bytes of one message */
