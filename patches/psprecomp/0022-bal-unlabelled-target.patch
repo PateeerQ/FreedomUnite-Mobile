@@ -1,0 +1,22 @@
+diff --git a/tools/allegrexrecomp/emit.c b/tools/allegrexrecomp/emit.c
+index 1138380..1536bc2 100644
+--- a/tools/allegrexrecomp/emit.c
++++ b/tools/allegrexrecomp/emit.c
+@@ -883,11 +883,13 @@ static void emit_function(ectx *c, const a_func *fn) {
+                 fprintf(f, "          psp_import_%08X();\n", in.target);
+             else if (is_function(an, in.target))
+                 fprintf(f, "          psp_func_%08X();\n", in.target);
+-            /* Only a labelled address gets a thunk. Data decoded as code can
++            /* Only a labelled address that is not a delay slot gets a thunk
++             * (the loop at the end of emit_function). Data decoded as code can
+              * branch-and-link to one that has none (MHFU's game_task:
+-             * `bgezall` to the word after its own delay slot), which did not
+-             * link; such a target is dispatched to. */
+-            else if (owned_by(an, in.target, owner) && c->is_label[widx(an, in.target)])
++             * `bgezall` to the delay slot of the branch in its own slot),
++             * which did not link; such a target is dispatched to. */
++            else if (owned_by(an, in.target, owner) && c->is_label[widx(an, in.target)] &&
++                     !c->is_slot[widx(an, in.target)])
+                 fprintf(f, "          psp_at_%08X();\n", in.target);
+             else
+                 fprintf(f, "          psp_dispatch(0x%08Xu);\n", in.target);
