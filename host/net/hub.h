@@ -27,6 +27,20 @@ void mhn_hub_stop(mhn_hub *h);
 /* Run on the calling thread until stopped (the standalone server). */
 void mhn_hub_run(mhn_hub *h);
 
+/* Limits, for a hub open to the internet (tools/mhfu_hub.c); 0 means none.
+ * Set them before the hub runs. An in-app hub has none. */
+typedef struct {
+    int max_clients;        /* connections at once */
+    int max_per_ip;         /* connections from one address */
+    int max_rooms;          /* rooms at once */
+    int rooms_per_ip;       /* rooms one address may have made and still open */
+    int kbps_per_client;    /* what one connection may send, KB/s; more waits (TCP slows it) */
+    int kbps_total;         /* what all of them together may send, KB/s */
+    int hello_ms;           /* time to say HELLO (or ask for the list) after connecting */
+    int send_timeout_ms;    /* a player who stops reading is dropped after this */
+} mhn_hub_limits;
+void mhn_hub_set_limits(mhn_hub *h, const mhn_hub_limits *lim);
+
 /* Free a hub that is not running. */
 void mhn_hub_free(mhn_hub *h);
 

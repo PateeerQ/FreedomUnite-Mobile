@@ -29,6 +29,9 @@ typedef struct {
     int in_group;
     uint64_t group_seq;          /* order of joining: the earliest member hosts the group */
     uint64_t last_ms;
+    uint64_t since_ms;           /* when it connected */
+    uint64_t win_ms, win_bytes;  /* what it sent in the current second */
+    uint64_t chat_ms[MHN_CHAT_BURST];   /* when its last few chat lines came */
     int dead;
     char ip[48];
 } client;
@@ -38,6 +41,7 @@ typedef struct {
     char code[MHN_CODE_LEN];
     char pass[MHN_PASS_LEN];     /* "" when anyone may join */
     char name[MHN_NAME_LEN];     /* for the list: whose room it is */
+    char by_ip[48];              /* who made it (rooms_per_ip) */
     uint64_t empty_since;        /* 0 while anyone is in it */
 } room;
 
@@ -50,7 +54,12 @@ struct mhn_hub {
     room rooms[MAX_ROOMS];
     uint64_t seq;
     volatile int stop, running;
+    mhn_hub_limits lim;
+    uint64_t win_ms, win_bytes;  /* what everyone sent in the current second */
+    uint64_t next_note_ms;       /* limit messages, at most one a second */
 };
+
+void mhn_hub_set_limits(mhn_hub *h, const mhn_hub_limits *lim) { h->lim = *lim; }
 
 static void default_log(const char *line) { printf("%s\n", line); fflush(stdout); }
 static void (*g_log)(const char *) = default_log;
@@ -77,7 +86,15 @@ static int find_room(mhn_hub *h, const char *code) {
     return -1;
 }
 
+static int rooms_open(mhn_hub *h, const char *by_ip) {
+    int n = 0;
+    for (int i = 0; i < MAX_ROOMS; i++)
+        if (h->rooms[i].used && (!by_ip || !strcmp(h->rooms[i].by_ip, by_ip))) n++;
+    return n;
+}
+
 static int new_room(mhn_hub *h) {
+    if (h->lim.max_rooms && rooms_open(h, NULL) >= h->lim.max_rooms) return -1;
     int slot = -1;
     for (int i = 0; i < MAX_ROOMS && slot < 0; i++) if (!h->rooms[i].used) slot = i;
     if (slot < 0) return -1;
@@ -254,6 +271,26 @@ static void route(mhn_hub *h, client *c, int type, uint8_t *body, uint32_t len) 
     }
 }
 
+/* ---- the room's chat ---- */
+
+static void chat(mhn_hub *h, client *c, const uint8_t *b, uint32_t len) {
+    if (!len || len > MHN_CHAT_MAX) return;
+    /* At most MHN_CHAT_BURST lines in MHN_CHAT_WINDOW_MS; the rest are dropped. */
+    const uint64_t now = net_now_ms();
+    int oldest = 0;
+    for (int i = 1; i < MHN_CHAT_BURST; i++) if (c->chat_ms[i] < c->chat_ms[oldest]) oldest = i;
+    if (c->chat_ms[oldest] && now - c->chat_ms[oldest] < MHN_CHAT_WINDOW_MS) return;
+    c->chat_ms[oldest] = now;
+    uint8_t f[6 + MHN_NICK_LEN + MHN_CHAT_MAX];
+    memcpy(f, c->mac, 6);
+    memcpy(f + 6, c->nick, MHN_NICK_LEN);
+    memcpy(f + 6 + MHN_NICK_LEN, b, len);
+    for (int i = 0; i < h->ncl; i++) {
+        client *o = h->cl[i];
+        if (o != c && !o->dead && o->room == c->room) send_frame(o, MHN_CHAT, f, 6 + MHN_NICK_LEN + len);
+    }
+}
+
 /* ---- the session ---- */
 
 static void hello(mhn_hub *h, client *c, const uint8_t *b, uint32_t len) {
@@ -280,8 +317,18 @@ static void hello(mhn_hub *h, client *c, const uint8_t *b, uint32_t len) {
 
     int r = -1;
     if (create && h->open_rooms) {
+        if (h->lim.rooms_per_ip && rooms_open(h, c->ip) >= h->lim.rooms_per_ip) {
+            logf_("hub: %s may not open more rooms (%d open)", c->ip, h->lim.rooms_per_ip);
+            mhn_put32(w, MHN_ROOM_FULL);
+            send_frame(c, MHN_WELCOME, w, sizeof w);
+            c->dead = 1;
+            return;
+        }
         r = new_room(h);
-        if (r >= 0) room_label(&h->rooms[r], pass, c->nick);
+        if (r >= 0) {
+            room_label(&h->rooms[r], pass, c->nick);
+            snprintf(h->rooms[r].by_ip, sizeof h->rooms[r].by_ip, "%s", c->ip);
+        }
     } else {
         r = find_room(h, code);
     }
@@ -341,6 +388,7 @@ static void handle(mhn_hub *h, client *c, int type, uint8_t *b, uint32_t len) {
     case MHN_PTP_DATA: case MHN_PTP_FIN:
         route(h, c, type, b, len);
         break;
+    case MHN_CHAT:          chat(h, c, b, len); break;
     case MHN_PING:          break;
     default:                break;
     }
@@ -379,6 +427,8 @@ static void read_client(mhn_hub *h, client *c) {
     if (n <= 0) { c->dead = 1; return; }
     c->len += (uint32_t)n;
     c->last_ms = net_now_ms();
+    c->win_bytes += (uint64_t)n;
+    h->win_bytes += (uint64_t)n;
     uint32_t off = 0;
     while (c->len - off >= 5) {
         uint32_t fl = mhn_get32(c->buf + off);
@@ -418,38 +468,68 @@ static void lan_query(mhn_hub *h) {
     net_udp_sendto(h->usock, ip, port, r, sizeof r);
 }
 
+/* Over its share this second? Then it is not read until the next one: TCP
+ * holds the rest back at the sender, nothing is lost and nothing spins. */
+static int throttled(mhn_hub *h, client *c, uint64_t now) {
+    if (now - c->win_ms >= 1000) { c->win_ms = now; c->win_bytes = 0; }
+    if (h->lim.kbps_per_client && c->win_bytes >= (uint64_t)h->lim.kbps_per_client * 1024) return 1;
+    if (h->lim.kbps_total && h->win_bytes >= (uint64_t)h->lim.kbps_total * 1024) return 1;
+    return 0;
+}
+
+static void note(mhn_hub *h, uint64_t now, const char *fmt, const char *ip) {
+    if (now < h->next_note_ms) return;
+    h->next_note_ms = now + 1000;
+    logf_(fmt, ip);
+}
+
+static void accept_client(mhn_hub *h) {
+    char ip[48] = "";
+    net_sock s = net_tcp_accept(h->lsock, ip, sizeof ip);
+    if (s == NET_BAD_SOCK) return;
+    const uint64_t now = net_now_ms();
+    const int cap = h->lim.max_clients && h->lim.max_clients < MAX_CLIENTS ? h->lim.max_clients : MAX_CLIENTS;
+    if (h->ncl >= cap) { note(h, now, "hub: full, refused %s", ip); net_close(s); return; }
+    if (h->lim.max_per_ip) {
+        int same = 0;
+        for (int i = 0; i < h->ncl; i++) same += !strcmp(h->cl[i]->ip, ip);
+        if (same >= h->lim.max_per_ip) { note(h, now, "hub: too many connections from %s", ip); net_close(s); return; }
+    }
+    client *c = (client *)calloc(1, sizeof *c);
+    if (!c) { net_close(s); return; }
+    if (h->lim.send_timeout_ms) net_set_send_timeout(s, h->lim.send_timeout_ms);
+    c->s = s;
+    c->room = -1;
+    c->last_ms = c->since_ms = c->win_ms = now;
+    snprintf(c->ip, sizeof c->ip, "%s", ip);
+    h->cl[h->ncl++] = c;
+}
+
 void mhn_hub_poll(mhn_hub *h, int timeout_ms) {
     net_sock socks[NET_POLL_MAX];
     uint8_t ready[NET_POLL_MAX];
+    client *who[NET_POLL_MAX];
+    uint64_t now = net_now_ms();
+    if (now - h->win_ms >= 1000) { h->win_ms = now; h->win_bytes = 0; }
     int n = 0;
-    socks[n++] = h->lsock;
-    socks[n++] = h->usock;
-    for (int i = 0; i < h->ncl; i++) socks[n++] = h->cl[i]->s;
+    socks[n] = h->lsock; who[n++] = NULL;
+    socks[n] = h->usock; who[n++] = NULL;
+    for (int i = 0; i < h->ncl && n < NET_POLL_MAX; i++) {
+        if (throttled(h, h->cl[i], now)) continue;
+        socks[n] = h->cl[i]->s;
+        who[n++] = h->cl[i];
+    }
     if (net_poll(socks, n, ready, timeout_ms) < 0) return;
 
-    int ncl = h->ncl;                         /* new clients are read next pass */
-    for (int i = 0; i < ncl; i++) if (ready[2 + i]) read_client(h, h->cl[i]);
+    for (int i = 2; i < n; i++) if (ready[i] && !who[i]->dead) read_client(h, who[i]);   /* new clients: next pass */
     if (ready[1]) lan_query(h);
-    if (ready[0]) {
-        char ip[48] = "";
-        net_sock s = net_tcp_accept(h->lsock, ip, sizeof ip);
-        if (s != NET_BAD_SOCK) {
-            client *c = h->ncl < MAX_CLIENTS ? (client *)calloc(1, sizeof *c) : NULL;
-            if (!c) net_close(s);
-            else {
-                c->s = s;
-                c->room = -1;
-                c->last_ms = net_now_ms();
-                snprintf(c->ip, sizeof c->ip, "%s", ip);
-                h->cl[h->ncl++] = c;
-            }
-        }
-    }
+    if (ready[0]) accept_client(h);
 
-    uint64_t now = net_now_ms();
+    now = net_now_ms();
     for (int i = h->ncl - 1; i >= 0; i--) {
         client *c = h->cl[i];
-        if (!c->dead && now - c->last_ms > IDLE_DROP_MS) c->dead = 1;
+        if (!c->dead && now - c->last_ms > IDLE_DROP_MS && !throttled(h, c, now)) c->dead = 1;
+        if (!c->dead && c->room < 0 && h->lim.hello_ms && now - c->since_ms > (uint64_t)h->lim.hello_ms) c->dead = 1;
         if (c->dead) drop(h, i);
     }
     if (h->open_rooms)
