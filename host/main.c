@@ -306,7 +306,7 @@ int main(int argc, char **argv) {
     if (argc < 3) {
         fprintf(stderr, "usage: %s <decrypted EBOOT> <root dir> [--iso FILE] [--budget N] [--seconds N]"
                 " [--window [SCALE]] [--press SCRIPT] [--snap N] [--name NAME]\n"
-                "       multiplayer: [--net-create | --net-join CODE] [--nick NAME] [--mac 02:..] [--relay HOST[:PORT]]\n",
+                "       multiplayer: [--net-create | --net-join CODE] [--net-pass 1234] [--nick NAME] [--mac 02:..] [--relay HOST[:PORT]]\n",
                 argv[0]);
         return 2;
     }
@@ -317,7 +317,7 @@ int main(int argc, char **argv) {
     const char *eboot = argv[1];
     g_root = argv[2];
     const char *iso = NULL, *press = NULL, *name = NULL;
-    const char *nick = NULL, *mac = NULL, *relay = NULL, *net_join = NULL;
+    const char *nick = NULL, *mac = NULL, *relay = NULL, *net_join = NULL, *net_pass = NULL;
     unsigned long long budget = DEFAULT_BUDGET;
     int window = 0, snap = 0, net_create = 0;
     for (int i = 3; i < argc; i++) {
@@ -329,6 +329,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--net-create")) net_create = 1;
         else if (!more) break;
         else if (!strcmp(argv[i], "--net-join")) net_join = argv[++i];
+        else if (!strcmp(argv[i], "--net-pass")) net_pass = argv[++i];
         else if (!strcmp(argv[i], "--nick"))     nick = argv[++i];
         else if (!strcmp(argv[i], "--mac"))      mac = argv[++i];
         else if (!strcmp(argv[i], "--relay"))    relay = argv[++i];
@@ -367,7 +368,8 @@ int main(int argc, char **argv) {
     mhfu_adhoc_register();
     if (net_create || net_join) {
         char err[256], status[128];
-        if ((net_create ? mhfu_lobby_create(err, sizeof err) : mhfu_lobby_join(net_join, err, sizeof err)) != 0)
+        if ((net_create ? mhfu_lobby_create(net_pass, err, sizeof err)
+                        : mhfu_lobby_join(net_join, net_pass, err, sizeof err)) != 0)
             printf("net: %s\n", err);
         mhfu_lobby_status(status, sizeof status);
         printf("net: %s\n", status);
