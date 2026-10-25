@@ -700,7 +700,7 @@ static void draw_editor(canvas *c, float s) {
  * Android dialogs (MhfuActivity, over JNI): they need text fields. */
 
 enum { R_HEAD, R_ITEM };
-enum { M_RESUME, M_NET, M_ACH, M_VPAD, M_EDIT, M_OPACITY, M_FPS, M_UPDATE, M_EXIT };
+enum { M_RESUME, M_NET, M_ACH, M_VPAD, M_EDIT, M_OPACITY, M_FPS, M_UPDATE, M_ABOUT, M_EXIT };
 typedef struct { int kind, id; const char *text; } menu_row;
 static const menu_row k_menu[] = {
     { R_HEAD, -1, "GAME" },     { R_ITEM, M_RESUME, "Back to game" },
@@ -711,7 +711,7 @@ static const menu_row k_menu[] = {
     { R_ITEM, M_OPACITY, "Button opacity" }, { R_ITEM, M_FPS, "Show FPS" },
     { R_HEAD, -1, "APP" },
 #ifdef __ANDROID__
-    { R_ITEM, M_UPDATE, "Check for updates" },
+    { R_ITEM, M_UPDATE, "Check for updates" }, { R_ITEM, M_ABOUT, "About" },
 #endif
     { R_ITEM, M_EXIT, "Exit game" },
 };
@@ -871,6 +871,7 @@ static void menu_tap(float px, float py, float w, float h) {
             case M_UPDATE: menu_set(0); android_call("checkUpdates"); break;
             case M_NET: menu_set(0); android_call("openMultiplayer"); break;
             case M_ACH: menu_set(0); android_call("openAchievements"); break;
+            case M_ABOUT: menu_set(0); android_call("openAbout"); break;
 #endif
             case M_OPACITY: g_vpad_alpha = g_vpad_alpha >= 100 ? 25 : g_vpad_alpha + 25; settings_save(); break;
             case M_EXIT: {

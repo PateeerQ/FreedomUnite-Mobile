@@ -12,6 +12,7 @@
  * The Multiplayer menu is "Create Server" / "Join Server" (lobby.h): the
  * room's code and player count show in the title bar. */
 #include "window.h"
+#include "about.h"
 
 #if defined(_WIN32) && !MHFU_SDL_WINDOW
 
@@ -127,7 +128,7 @@ static void grab(void) {
  * and the passcode is asked for there. A code typed in joins directly. */
 
 enum {
-    ID_CREATE = 100, ID_JOIN, ID_LEAVE,
+    ID_CREATE = 100, ID_JOIN, ID_LEAVE, ID_ABOUT,
     ID_DLG_OK, ID_DLG_CANCEL, ID_PASS_EDIT, ID_CODE_EDIT, ID_ROOM_LIST, ID_REFRESH, ID_TEXT_EDIT,
 };
 #define WM_LOBBY_DONE (WM_APP + 1)
@@ -415,6 +416,9 @@ static HMENU make_menu(void) {
     AppendMenuA(mp, MF_SEPARATOR, 0, NULL);
     AppendMenuA(mp, MF_STRING, ID_LEAVE, "&Leave Server");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)mp, "&Multiplayer");
+    HMENU help = CreatePopupMenu();
+    AppendMenuA(help, MF_STRING, ID_ABOUT, "&About");
+    AppendMenuA(bar, MF_POPUP, (UINT_PTR)help, "&Help");
     return bar;
 }
 
@@ -425,6 +429,9 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_CREATE: if (!g_lobby_busy) ask_create(); break;
         case ID_JOIN:   if (!g_lobby_busy) ask_join(); break;
         case ID_LEAVE:  mhfu_lobby_leave(); update_title(); break;
+        case ID_ABOUT:
+            MessageBoxA(h, MHFU_APP_NAME "\nVersion " MHFU_VERSION "\n\n" MHFU_ABOUT_TEXT, "About", MB_OK | MB_ICONINFORMATION);
+            break;
         }
         return 0;
     case WM_ASK_TEXT:
@@ -536,6 +543,7 @@ static DWORD WINAPI window_thread(LPVOID arg) {
     wc.lpfnWndProc = wndproc;
     wc.hInstance = GetModuleHandleA(NULL);
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hIcon = LoadIconA(wc.hInstance, MAKEINTRESOURCEA(1));      /* the crest (assets/icon/mhfu.rc) */
     wc.lpszClassName = "mhfu_host";
     RegisterClassA(&wc);
 
