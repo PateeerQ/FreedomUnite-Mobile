@@ -21,6 +21,12 @@
     <!-- LAN room discovery uses UDP broadcast -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
+    <!-- PPSSPP: the PSP's fonts are read out of its APK (SetupActivity) -->
+    <queries>
+        <package android:name="org.ppsspp.ppsspp" />
+        <package android:name="org.ppsspp.ppssppgold" />
+    </queries>
+
     <application android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
         android:allowBackup="false"
