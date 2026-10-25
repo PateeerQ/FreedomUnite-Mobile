@@ -10,8 +10,32 @@ multiplayer through a private server.
 
 ## Status
 
-Desktop bring-up. The EBOOT and the first overlays recompile, and the game
-boots to its language selection screen.
+Desktop bring-up on Windows (PC first, Android after). The game boots, plays
+its movies, creates and saves a character, loads the save and runs the village
+(Pokke), the house and the Training School in 3D at its own 30 fps, with
+sound, music, keyboard and DualSense/Xbox controllers. Quests are not tested
+yet.
+
+### Progress
+
+Rough estimates, as of 2026-10-25. "Recompiled" means the code builds and is
+switched in when the game loads it; "tested" means someone has played through it.
+
+| Area | Progress | Notes |
+|---|---|---|
+| CPU recompilation (Allegrex + VFPU) | `████████░░` 85% | EBOOT and every overlay recompile; VFPU ops checked against PPSSPP as they turn up |
+| Game overlays, recompiled | `██████████` 100% | 298 of 298, extracted from DATA.BIN (`tools/re/databin.py`) |
+| Game overlays, tested in game | `█░░░░░░░░░` 5% | title, menus, character creation, village, house, Training School |
+| System modules (firmware HLE) | `███████░░░` 70% | threads, I/O, UMD/ISO, display, ctrl, utility dialogs, savedata, libfont, sceMpeg, sceAtrac, sceNetAdhoc; missing: encrypted saves, the sound PRX |
+| Graphics (GE + GL renderer) | `███████░░░` 70% | textures, lighting, fog, skinning, clipping, render-to-texture; missing: stencil, colour test, logic op, mipmaps, culling, DXT, specular, points/lines |
+| Audio | `████████░░` 80% | sound effects, music (ATRAC3/3+ via FFmpeg), movie sound; small gaps while loading |
+| Movies | `█████████░` 90% | H.264 + ATRAC3+ via FFmpeg, own PSMF demuxer |
+| Input | `█████████░` 90% | keyboard, controllers (right stick = camera), text box for the game's keyboard |
+| Save data | `████████░░` 80% | save and load work (unencrypted) |
+| Multiplayer (ad hoc over rooms) | `████░░░░░░` 40% | rooms with list + passcode work and are tested without the game; not yet in game |
+| Gameplay coverage | `██░░░░░░░░` 20% | village life works; quests, hunts, the Gathering Hall untested |
+| PC release (launcher) | `░░░░░░░░░░` 0% | after the game works end to end |
+| Android port | `░░░░░░░░░░` 0% | NDK + SDL3, touch buttons, GLES renderer |
 
 ## Layout
 
@@ -25,7 +49,9 @@ boots to its language selection screen.
 | `seeds/eboot.txt` | EBOOT functions only reached through a register-built address |
 | `host/input.c` | controller: scripted presses, the window's keys, frame snapshots |
 | `host/window.c` | a Windows window: the OpenGL context psprecomp's GL renderer draws with (or the software renderer's framebuffer), the keyboard, the FPS overlay (F3), the Multiplayer menu |
-| `host/atrac.c`, `host/mpeg.c` | sceAtrac3plus and sceMpeg with their bookkeeping but no decoders yet: music is silent, movies black |
+| `host/atrac.c`, `host/mpeg.c` | sceAtrac3plus and sceMpeg, decoding with FFmpeg (`deps/ffmpeg`, gitignored): music, movies with sound |
+| `host/audio.c`, `host/gamepad.c` | sound output and controllers, through SDL3 |
+| `tools/re/databin.py` | decrypts DATA.BIN as the game does and extracts every overlay |
 | `host/lobby.c` | "Create Server" / "Join Server": rooms by code, settings in `<root>/net.cfg` |
 | `host/adhoc.c` | sceNet, sceNetAdhoc (PDP/PTP), sceNetAdhocctl and sceWlan over the room network |
 | `host/net/` | the room network: protocol (`proto.h`), hub, client, sockets/threads for Windows and POSIX |
@@ -59,12 +85,17 @@ The decrypted EBOOT can be made with PPSSPP: Settings, Tools, Developer tools,
 
 ## Overlays
 
-MHFU loads part of its code from `DATA.BIN` while it runs. When the host meets
-an overlay that has no recompiled version yet, it saves it to
-`work/overlays/` and the run stops at the first jump into it. Run
-`setup.ps1` again: it recompiles every saved overlay into `work/gen_ovl/`,
-and the next run switches each one in when the game loads it. Repeat until a
-run saves nothing new.
+MHFU loads part of its code from `DATA.BIN` while it runs (298 overlays:
+menus, stages, monsters). Extract them all once, then let setup recompile them
+into `work/gen_ovl/`:
+
+```powershell
+python tools\re\databin.py work\ULES01213_EBOOT.BIN work\root\disc\PSP_GAME\USRDIR\DATA.BIN overlays work\overlays
+.\scripts\setup.ps1 -Iso "<iso>" -Eboot "<eboot>" -KeepDisc
+```
+
+If the host still meets an overlay with no recompiled version, it saves it to
+`work/overlays/` and stops; running `setup.ps1` again picks it up.
 
 ## Fonts
 
@@ -81,15 +112,18 @@ another folder with `-Fonts <folder>`. Without them the text is blank.
 
 Keys: W/A/S/D = analog stick, arrows = D-pad, K or Space = Cross, L = Circle,
 J = Square, I = Triangle, Q = L, E = R, Enter = Start, V/Backspace = Select.
-F3 shows or hides the FPS line. The game is held to 60 frames a second there.
+F3 shows or hides the FPS line. The game runs at its own 30 frames a second
+(vblanks follow real time). Controllers (DualSense, DualShock, Xbox) work by
+button position; the right stick moves the camera. `MHFU_NO_GAMEPAD=1` ignores them.
 
 The window draws with OpenGL at `-Scale` times the PSP's resolution (default
 2). `-Renderer software` uses psprecomp's reference rasteriser instead: slow
 (about 9 FPS in the village), but it is the one the GL renderer is checked
 against.
 
-There is no on-screen keyboard: when the game asks for text (the character
-name) it gets `-Name`, `Hunter` by default: `.\scripts\run.ps1 -Window -Name "Pateeer"`.
+When the game asks for text (the character name), a text box opens over the
+window. `-Name "Pateeer"` answers it without asking; scripted runs (`-Press`)
+answer `Hunter`.
 
 Without a window, `-Press "300:CROSS,420:START"` presses buttons at given game
 frames (one controller read each, held 6 frames; `500-560:UP` holds a range)
