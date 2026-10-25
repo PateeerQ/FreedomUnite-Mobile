@@ -56,12 +56,24 @@ static int host(const char *relay) {
     int lis = mhn_ptp_listen(200, 4);
     CHECK(pdp > 0 && lis > 0, "sockets open");
 
-    int echoed = 0, accepted = 0, conn = 0, streamed = 0;
-    uint64_t until = net_now_ms() + 30000;
-    while (net_now_ms() < until && !(echoed >= 2 && streamed >= 100000)) {
+    int echoed = 0, accepted = 0, conn = 0, streamed = 0, chats = 0;
+    uint64_t until = net_now_ms() + 30000, quiet_since = 0;
+    /* Until the guest's chat lines have stopped coming for 2 s (a hub drops
+     * all but MHN_CHAT_BURST of them). */
+    while (net_now_ms() < until && !(echoed >= 2 && streamed >= 100000 && chats && net_now_ms() - quiet_since > 2000)) {
         uint8_t from[6], buf[2048];
         uint16_t port;
         int len = sizeof buf;
+        char nick[MHN_NICK_LEN], line[MHN_CHAT_MAX + 1];
+        int joined;
+        while (mhn_chat_next(nick, sizeof nick, line, sizeof line, &joined)) {   /* every chat line, answered */
+            if (joined) continue;                                             /* the guest coming in */
+            char reply[MHN_CHAT_MAX + 1];
+            snprintf(reply, sizeof reply, "re: %s", line);
+            mhn_chat_send(reply);
+            chats++;
+            quiet_since = net_now_ms();
+        }
         if (mhn_pdp_recv(pdp, from, &port, buf, &len) == 0) {
             mhn_pdp_send(pdp, from, port, buf, len);
             echoed++;
@@ -80,6 +92,7 @@ static int host(const char *relay) {
     }
     CHECK(echoed >= 2, "echoed the guest's datagrams");
     CHECK(accepted, "accepted and echoed a PTP connection");
+    CHECK(chats == MHN_CHAT_BURST, "the guest's chat lines came, all but the ones over the limit");
     net_sleep_ms(1500);   /* let the guest read the echo before the room closes */
     mhn_ptp_close(conn);
     mhn_client_stop();
@@ -160,8 +173,45 @@ static int join(const char *code, const char *relay) {
     net_sleep_ms(500);
     mhn_ptp_stat_of(r, &st);
     CHECK(st.state == MHN_PTP_CLOSED, "connect to a closed port refused");
+
+    /* Chat: MHN_CHAT_BURST + 2 lines at once; the host answers every one it
+     * gets, so the hub's limit shows as exactly MHN_CHAT_BURST answers. */
+    for (int i = 0; i < MHN_CHAT_BURST + 2; i++) {
+        char line[32];
+        snprintf(line, sizeof line, "hello %d", i);
+        mhn_chat_send(line);
+    }
+    int answers = 0, from_host = 1;
+    until = net_now_ms() + 4000;
+    while (net_now_ms() < until) {
+        char nick[MHN_NICK_LEN], line[MHN_CHAT_MAX + 1];
+        int joined;
+        if (mhn_chat_next(nick, sizeof nick, line, sizeof line, &joined)) {
+            if (joined) continue;
+            answers++;
+            from_host &= !strcmp(nick, "Host") && !strncmp(line, "re: hello ", 10);
+        } else net_sleep_ms(10);
+    }
+    CHECK(answers == MHN_CHAT_BURST && from_host, "chat lines answered by the host, the extra ones held back");
     mhn_client_stop();
     printf("PASS\n");
+    return 0;
+}
+
+/* Into a room as "Tester", one chat line, out: to see the chat in a game. */
+static int say(const char *code, const char *relay, const char *text) {
+    char host[64];
+    uint16_t port = MHN_PORT;
+    if (relay) {
+        snprintf(host, sizeof host, "%s", relay);
+        char *colon = strrchr(host, ':');                 /* HOST:PORT */
+        if (colon) { port = (uint16_t)atoi(colon + 1); *colon = 0; }
+    } else CHECK(mhn_lan_find(code, host, sizeof host, &port, 3000) == 0, "room found on the LAN");
+    const uint8_t mac[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x03 };
+    CHECK(mhn_client_start(host, port, 0, code, mac, "Tester", g_pass) == MHN_OK, "joined the room");
+    CHECK(mhn_chat_send(text) == 0, "chat line sent");
+    net_sleep_ms(1000);
+    mhn_client_stop();
     return 0;
 }
 
@@ -171,6 +221,7 @@ int main(int argc, char **argv) {
     if (argc >= 2 && !strcmp(argv[1], "host")) return host(NULL);
     if (argc >= 3 && !strcmp(argv[1], "relay")) return host(argv[2]);
     if (argc >= 3 && !strcmp(argv[1], "join")) return join(argv[2], argc >= 4 ? argv[3] : NULL);
-    fprintf(stderr, "usage: mhfu_netcheck host | relay HOST | join CODE [HOST]   [--pass 1234]\n");
+    if (argc >= 4 && !strcmp(argv[1], "say")) return say(argv[2], argc >= 5 ? argv[3] : NULL, argv[argc - 1]);
+    fprintf(stderr, "usage: mhfu_netcheck host | relay HOST | join CODE [HOST] | say CODE [HOST] TEXT   [--pass 1234]\n");
     return 2;
 }
