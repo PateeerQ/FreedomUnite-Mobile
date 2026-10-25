@@ -18,4 +18,8 @@ void mhfu_audio_stats(uint64_t *in, uint64_t *short_, uint64_t *dropped);
  * counted: psprecomp's own lead on blocking output (35 ms). */
 double mhfu_audio_latency_ms(void);
 
+/* Diagnostics: a decoder's first audible frame was made at `decoded_us`
+ * (mhfu_clock_us); the log says when sound first reaches sceAudio after it. */
+void mhfu_audio_mark(uint64_t decoded_us);
+
 #endif

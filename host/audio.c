@@ -13,6 +13,8 @@
 #include <string.h>
 
 #include "psprecomp/hle.h"
+#include "hle_mhfu.h"
+#include <stdio.h>
 
 #define CHANNELS   8
 #define RING       16384          /* frames per channel, about 0.37 s */
@@ -29,6 +31,10 @@ static ring g_ring[CHANNELS];
  * channel did not have (heard as gaps), frames dropped for running ahead. */
 static volatile uint64_t g_in_frames, g_short_frames, g_dropped_frames;
 
+/* Latency, for the log: the fullest ring as the output reads it, summed over
+ * reads, plus what the output device still holds (set by the SDL path). */
+static volatile uint64_t g_lat_sum, g_lat_n, g_dev_frames;
+
 void mhfu_audio_stats(uint64_t *in, uint64_t *short_, uint64_t *dropped) {
     *in = g_in_frames; *short_ = g_short_frames; *dropped = g_dropped_frames;
 }
@@ -41,9 +47,24 @@ double mhfu_audio_latency_ms(void) {
     return (ring + (double)g_dev_frames) * 1000.0 / 44100.0;
 }
 
+/* mhfu_audio_mark: the time a decoder produced its first sound, so the first
+ * sound to reach the output after it can say how long the game held it. */
+static volatile uint64_t g_mark_us;
+void mhfu_audio_mark(uint64_t decoded_us) { if (!g_mark_us) g_mark_us = decoded_us; }
+
 /* psprecomp's sceAudio hands every buffer here (patch 0014). */
 static void sink(int ch, const int16_t *pcm, uint32_t frames, int stereo, int vol_l, int vol_r) {
     if (ch < 0 || ch >= CHANNELS || !pcm) return;
+    if (g_mark_us) {
+        for (uint32_t i = 0; i < frames * (stereo ? 2 : 1); i++) {
+            if (pcm[i] > 64 || pcm[i] < -64) {
+                printf("audio: the first decoded sound reached sceAudio %.0f ms after it was decoded\n",
+                       (double)(mhfu_clock_us() - g_mark_us) / 1000.0);
+                g_mark_us = 0;
+                break;
+            }
+        }
+    }
     ring *r = &g_ring[ch];
     uint32_t wr = r->wr;
     if (wr - r->rd > MAX_AHEAD) {                         /* too far ahead: drop the oldest */
@@ -60,10 +81,6 @@ static void sink(int ch, const int16_t *pcm, uint32_t frames, int stereo, int vo
     }
     r->wr = wr + frames;
 }
-
-/* Latency, for the log: the fullest ring as the output reads it, summed over
- * reads, plus what the output device still holds (set by the SDL path). */
-static volatile uint64_t g_lat_sum, g_lat_n, g_dev_frames;
 
 static void mix(int16_t *out, uint32_t frames) {
     static int32_t acc[2 * 2048];
