@@ -71,6 +71,8 @@ std::vector<Check> ready_check(const Config &c, const std::string &gpu) {
 
     const int ovl = count_dirs(P(paths::work()) / "gen_ovl");
     if (!file_exists(paths::host_exe())) out.push_back({false, false, "Recompiled game", "mhfu_host.exe is missing: run setup.ps1"});
+    else if (ovl == 0)                  // a release: the overlays are inside mhfu_host.exe
+        out.push_back({true, false, "Recompiled game", "mhfu_host.exe"});
     else out.push_back({true, ovl < 298, "Recompiled game",
                         "mhfu_host.exe, " + std::to_string(ovl) + " of 298 overlays recompiled"});
 
