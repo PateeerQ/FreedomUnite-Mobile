@@ -55,11 +55,15 @@ else()
     find_package(Threads REQUIRED)
     target_link_libraries(mhfu_net PUBLIC Threads::Threads)
 endif()
-add_executable(mhfu_hub tools/mhfu_hub.c)
-target_link_libraries(mhfu_hub PRIVATE mhfu_net)
 add_executable(mhfu_netcheck tools/mhfu_netcheck.c)
 target_link_libraries(mhfu_netcheck PRIVATE mhfu_net)
-set_target_properties(mhfu_hub mhfu_netcheck PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+set_target_properties(mhfu_netcheck PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+# The internet relay is private (server/, gitignored): built only where it is.
+if(EXISTS "${CMAKE_SOURCE_DIR}/server/mhfu_hub.c")
+    add_executable(mhfu_hub server/mhfu_hub.c)
+    target_link_libraries(mhfu_hub PRIVATE mhfu_net)
+    set_target_properties(mhfu_hub PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+endif()
 
 # Gamepads (host/gamepad.c) and sound output (host/audio.c): SDL3, built
 # static from source, with only what those need. SDL reads the DualSense and
@@ -122,12 +126,12 @@ if(ANDROID)
     # SDL3 for Android has some C++ (its HID code): link with the C++ driver,
     # so the static libc++ (ANDROID_STL=c++_static) comes in.
     enable_language(CXX)
-    add_library(mhfu_host SHARED host/main.c host/android.c host/achievements.c host/hle_mhfu.c host/input.c host/keys.c host/stats.c host/libfont.c host/utility.c
+    add_library(mhfu_host SHARED host/main.c host/android.c host/achievements.c host/chat.c host/hle_mhfu.c host/input.c host/keys.c host/stats.c host/libfont.c host/utility.c
                host/adhoc.c host/lobby.c host/audio.c host/atrac.c host/mpeg.c ${MHFU_GEN_SOURCES})
     set_target_properties(mhfu_host PROPERTIES OUTPUT_NAME main LINKER_LANGUAGE CXX)
     target_link_libraries(mhfu_host PRIVATE android log EGL GLESv3 OpenSLES)
 else()
-    add_executable(mhfu_host host/main.c host/achievements.c host/hle_mhfu.c host/input.c host/keys.c host/stats.c host/libfont.c host/utility.c
+    add_executable(mhfu_host host/main.c host/achievements.c host/chat.c host/hle_mhfu.c host/input.c host/keys.c host/stats.c host/libfont.c host/utility.c
                host/adhoc.c host/lobby.c host/audio.c host/atrac.c host/mpeg.c ${MHFU_GEN_SOURCES})
 endif()
 target_include_directories(mhfu_host PRIVATE "${MHFU_GEN_DIR}" host)
