@@ -13,6 +13,10 @@ int mhfu_audio_start(void);
 #include <stdint.h>
 void mhfu_audio_stats(uint64_t *in, uint64_t *short_, uint64_t *dropped);
 
+/* Frames the output has taken (mixed), since the start: it should run at
+ * 44100 a second; less, and the channels fill up and drop. */
+uint64_t mhfu_audio_out_frames(void);
+
 /* How far behind the game the sound is heard, averaged since the last call:
  * what waits in the channel rings plus what the output device holds. Not
  * counted: psprecomp's own lead on blocking output (35 ms). */
@@ -21,5 +25,8 @@ double mhfu_audio_latency_ms(void);
 /* Diagnostics: a decoder's first audible frame was made at `decoded_us`
  * (mhfu_clock_us); the log says when sound first reaches sceAudio after it. */
 void mhfu_audio_mark(uint64_t decoded_us);
+
+/* Plays the achievement chime over the game's sound. Any thread. */
+void mhfu_audio_chime(void);
 
 #endif

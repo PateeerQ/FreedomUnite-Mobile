@@ -8,6 +8,7 @@
  * blocking output, not by this). */
 #include "audio.h"
 
+#include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,11 +30,13 @@ static ring g_ring[CHANNELS];
 
 /* For the log: frames the game sent, frames the output wanted but a playing
  * channel did not have (heard as gaps), frames dropped for running ahead. */
-static volatile uint64_t g_in_frames, g_short_frames, g_dropped_frames;
+static volatile uint64_t g_in_frames, g_short_frames, g_dropped_frames, g_out_frames;
 
 /* Latency, for the log: the fullest ring as the output reads it, summed over
  * reads, plus what the output device still holds (set by the SDL path). */
 static volatile uint64_t g_lat_sum, g_lat_n, g_dev_frames;
+
+uint64_t mhfu_audio_out_frames(void) { return g_out_frames; }
 
 void mhfu_audio_stats(uint64_t *in, uint64_t *short_, uint64_t *dropped) {
     *in = g_in_frames; *short_ = g_short_frames; *dropped = g_dropped_frames;
@@ -82,6 +85,36 @@ static void sink(int ch, const int16_t *pcm, uint32_t frames, int stereo, int vo
     r->wr = wr + frames;
 }
 
+/* The achievement chime: two bell notes, made once, mixed over the game. */
+#define CHIME_FRAMES 44100
+static int16_t g_chime[CHIME_FRAMES * 2];
+static volatile uint32_t g_chime_pos = CHIME_FRAMES;  /* CHIME_FRAMES: not playing */
+
+void mhfu_audio_chime(void) {
+    static int made;
+    if (!made) {
+        const double pi = 3.14159265358979;
+        for (int i = 0; i < CHIME_FRAMES; i++) {
+            const double t = i / 44100.0;
+            double v = 0;
+            /* B5, then E6 a moment later; a bell is the note plus a quiet
+             * octave, dying away. */
+            const double notes[2][2] = { { 987.77, 0.0 }, { 1318.51, 0.11 } };
+            for (int n = 0; n < 2; n++) {
+                const double u = t - notes[n][1];
+                if (u < 0) continue;
+                const double env = exp(-u * 4.2) * (u < 0.004 ? u / 0.004 : 1.0);
+                v += env * (sin(2 * pi * notes[n][0] * u) + 0.28 * sin(2 * pi * notes[n][0] * 2 * u));
+            }
+            const int16_t smp = (int16_t)(v * 0.16 * 32767);
+            g_chime[2 * i] = smp;
+            g_chime[2 * i + 1] = smp;
+        }
+        made = 1;
+    }
+    g_chime_pos = 0;
+}
+
 static void mix(int16_t *out, uint32_t frames) {
     static int32_t acc[2 * 2048];
     memset(acc, 0, (size_t)frames * 2 * sizeof acc[0]);
@@ -101,6 +134,11 @@ static void mix(int16_t *out, uint32_t frames) {
     }
     g_lat_sum += fullest;
     g_lat_n++;
+    g_out_frames += frames;
+    for (uint32_t i = 0; i < frames && g_chime_pos < CHIME_FRAMES; i++, g_chime_pos++) {
+        acc[2 * i] += g_chime[2 * g_chime_pos];
+        acc[2 * i + 1] += g_chime[2 * g_chime_pos + 1];
+    }
     for (uint32_t i = 0; i < frames * 2; i++)
         out[i] = (int16_t)(acc[i] > 32767 ? 32767 : acc[i] < -32768 ? -32768 : acc[i]);
 }
@@ -126,8 +164,14 @@ static void SDLCALL pull(void *user, SDL_AudioStream *stream, int additional, in
 }
 
 int mhfu_audio_start(void) {
-    /* A short device buffer: 256 frames, under 6 ms. */
+    /* A short device buffer: 256 frames, under 6 ms. On Android AAudio with
+     * that little took about 35000 frames a second instead of 44100 (the
+     * channels overflowed and dropped): 1024 there. */
+#ifdef __ANDROID__
+    SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, "1024");
+#else
     SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, "256");
+#endif
     if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
         fprintf(stderr, "audio: SDL: %s\n", SDL_GetError());
         return -1;
