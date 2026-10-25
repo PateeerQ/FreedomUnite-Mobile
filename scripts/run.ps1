@@ -60,6 +60,8 @@ param(
     # (e.g. work\root2; ms\ is copied from work\root the first time).
     [switch]$NetCreate,
     [string]$NetJoin,
+    # The room's 4-digit passcode: set by -NetCreate, given by -NetJoin.
+    [string]$NetPass,
     [string]$Nick,
     [string]$Mac,
     [string]$Relay,
@@ -117,6 +119,7 @@ if ($Press)  { $extra += " --press `"$Press`"" }
 if ($Name)   { $extra += " --name `"$Name`"" }
 if ($NetCreate) { $extra += " --net-create" }
 if ($NetJoin)   { $extra += " --net-join `"$NetJoin`"" }
+if ($NetPass)   { $extra += " --net-pass `"$NetPass`"" }
 if ($Nick)      { $extra += " --nick `"$Nick`"" }
 if ($Mac)       { $extra += " --mac $Mac" }
 if ($Relay)     { $extra += " --relay $Relay" }
