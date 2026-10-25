@@ -198,3 +198,8 @@ void mhfu_lobby_status(char *out, size_t cap) {
 
 void mhfu_lobby_mac(uint8_t mac[6]) { memcpy(mac, g_mac, 6); }
 const char *mhfu_lobby_nick(void) { return g_nick; }
+
+void mhfu_lobby_set_nick(const char *nick) {
+    snprintf(g_nick, sizeof g_nick, "%s", nick);
+    save_cfg();
+}

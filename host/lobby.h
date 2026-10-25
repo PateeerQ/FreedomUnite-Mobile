@@ -54,5 +54,7 @@ void mhfu_lobby_code(char code[8]);
 
 void mhfu_lobby_mac(uint8_t mac[6]);
 const char *mhfu_lobby_nick(void);
+/* A new name for the rooms this app makes and joins, kept in net.cfg. */
+void mhfu_lobby_set_nick(const char *nick);
 
 #endif
