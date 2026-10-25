@@ -52,6 +52,41 @@ static int read_stick(SDL_Gamepad *pad) {
     return ((x + 32768) >> 8) | ((y + 32768) >> 8) << 8;
 }
 
+/* The controller in use, chosen among those connected. */
+static SDL_Gamepad *g_pad;
+static int g_external;               /* the SDL window's loop feeds the events */
+
+void mhfu_gamepad_event(const SDL_Event *e) {
+    /* MHFU_GAMEPAD_GUID (the launcher's Controller page): only that device;
+     * otherwise the first one connected. */
+    static const char *want;
+    static int got_want;
+    if (!got_want) { want = getenv("MHFU_GAMEPAD_GUID"); got_want = 1; }
+    if (getenv("MHFU_NO_GAMEPAD")) return;
+    if (e->type == SDL_EVENT_GAMEPAD_ADDED && !g_pad) {
+        if (want && *want) {
+            char guid[64];
+            SDL_GUIDToString(SDL_GetGamepadGUIDForID(e->gdevice.which), guid, sizeof guid);
+            if (SDL_strcasecmp(guid, want) != 0) return;
+        }
+        g_pad = SDL_OpenGamepad(e->gdevice.which);
+        if (g_pad) { printf("gamepad: %s connected\n", SDL_GetGamepadName(g_pad)); fflush(stdout); }
+    } else if (e->type == SDL_EVENT_GAMEPAD_REMOVED && g_pad && e->gdevice.which == SDL_GetGamepadID(g_pad)) {
+        printf("gamepad: %s removed\n", SDL_GetGamepadName(g_pad));
+        fflush(stdout);
+        SDL_CloseGamepad(g_pad);
+        g_pad = NULL;
+    }
+}
+
+void mhfu_gamepad_update(void) {
+    SDL_SetAtomicInt(&g_buttons, g_pad ? (int)read_buttons(g_pad) : 0);
+    SDL_SetAtomicInt(&g_stick, g_pad ? read_stick(g_pad) : -1);
+}
+
+void mhfu_gamepad_external(void) { g_external = 1; }
+int mhfu_gamepad_connected(void) { return g_pad != NULL; }
+
 static int SDLCALL pad_thread(void *arg) {
     (void)arg;
     /* The window is not SDL's, so to SDL the program is always in the
@@ -61,22 +96,10 @@ static int SDLCALL pad_thread(void *arg) {
         fprintf(stderr, "gamepad: SDL: %s\n", SDL_GetError());
         return 0;
     }
-    SDL_Gamepad *pad = NULL;
     for (;;) {
         SDL_Event e;
-        while (SDL_PollEvent(&e)) {
-            if (e.type == SDL_EVENT_GAMEPAD_ADDED && !pad) {
-                pad = SDL_OpenGamepad(e.gdevice.which);
-                if (pad) { printf("gamepad: %s connected\n", SDL_GetGamepadName(pad)); fflush(stdout); }
-            } else if (e.type == SDL_EVENT_GAMEPAD_REMOVED && pad && e.gdevice.which == SDL_GetGamepadID(pad)) {
-                printf("gamepad: %s removed\n", SDL_GetGamepadName(pad));
-                fflush(stdout);
-                SDL_CloseGamepad(pad);
-                pad = NULL;
-            }
-        }
-        SDL_SetAtomicInt(&g_buttons, pad ? (int)read_buttons(pad) : 0);
-        SDL_SetAtomicInt(&g_stick, pad ? read_stick(pad) : -1);
+        while (SDL_PollEvent(&e)) mhfu_gamepad_event(&e);
+        mhfu_gamepad_update();
         SDL_Delay(4);
     }
     return 0;
@@ -86,7 +109,7 @@ int mhfu_gamepad_start(void) {
     SDL_SetAtomicInt(&g_stick, -1);
     /* MHFU_NO_GAMEPAD=1: scripted runs, which a controller lying on the desk
      * should not steer. */
-    if (getenv("MHFU_NO_GAMEPAD")) return 0;
+    if (getenv("MHFU_NO_GAMEPAD") || g_external) return 0;
     SDL_Thread *t = SDL_CreateThread(pad_thread, "gamepad", NULL);
     if (!t) return -1;
     SDL_DetachThread(t);
