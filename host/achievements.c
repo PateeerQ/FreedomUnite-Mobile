@@ -71,6 +71,53 @@ static uint32_t RC_CCONV read_memory(uint32_t address, uint8_t *buffer, uint32_t
     return num_bytes;
 }
 
+/* ---- the disc, for the hash ---- */
+
+#ifdef __ANDROID__
+#include <unistd.h>
+
+/* A disc chosen through Android's file picker comes as "/proc/self/fd/N";
+ * opening that path again is refused (shared storage's permission check), so
+ * the hash reads the descriptor itself, at a position of its own (as
+ * psprecomp's iofilemgr.c does for the game). */
+typedef struct { int fd; int64_t pos; } fd_reader;
+
+static int fd_read(void *c, char *buf, int n) {
+    fd_reader *r = (fd_reader *)c;
+    ssize_t got = pread(r->fd, buf, (size_t)n, (off_t)r->pos);
+    if (got > 0) r->pos += got;
+    return (int)got;
+}
+
+static fpos_t fd_seek(void *c, fpos_t off, int whence) {
+    fd_reader *r = (fd_reader *)c;
+    int64_t base = whence == SEEK_SET ? 0 : whence == SEEK_CUR ? r->pos : (int64_t)lseek(r->fd, 0, SEEK_END);
+    if (base + (int64_t)off < 0) return -1;
+    r->pos = base + (int64_t)off;
+    return (fpos_t)r->pos;
+}
+
+static int fd_close(void *c) { free(c); return 0; }
+
+static void *RC_CCONV disc_open(const char *path) {
+    int fd;
+    char tail;
+    if (sscanf(path, "/proc/self/fd/%d%c", &fd, &tail) == 1) {
+        fd_reader *r = (fd_reader *)calloc(1, sizeof *r);
+        if (!r) return NULL;
+        r->fd = fd;
+        FILE *f = funopen(r, fd_read, NULL, fd_seek, fd_close);
+        if (!f) free(r);
+        return f;
+    }
+    return fopen(path, "rb");
+}
+static void RC_CCONV disc_seek(void *f, int64_t off, int origin) { fseeko((FILE *)f, (off_t)off, origin); }
+static int64_t RC_CCONV disc_tell(void *f) { return (int64_t)ftello((FILE *)f); }
+static size_t RC_CCONV disc_read(void *f, void *buf, size_t n) { return fread(buf, 1, n, (FILE *)f); }
+static void RC_CCONV disc_close(void *f) { fclose((FILE *)f); }
+#endif
+
 /* ---- HTTP, on a thread per request ---- */
 
 #ifdef _WIN32
@@ -184,7 +231,7 @@ typedef struct {
     void *data;
 } call;
 
-static char *dup(const char *s) {
+static char *str_dup(const char *s) {
     if (!s) return NULL;
     const size_t n = strlen(s) + 1;
     char *d = (char *)malloc(n);
@@ -215,9 +262,9 @@ static void RC_CCONV server_call(const rc_api_request_t *request, rc_client_serv
     (void)client;
     call *c = (call *)calloc(1, sizeof *c);
     if (!c) return;
-    c->url = dup(request->url);
-    c->post = dup(request->post_data);
-    c->ctype = dup(request->content_type);
+    c->url = str_dup(request->url);
+    c->post = str_dup(request->post_data);
+    c->ctype = str_dup(request->content_type);
     c->callback = callback;
     c->data = callback_data;
     if (spawn(call_thread, c) != 0) call_thread(c);
@@ -375,6 +422,10 @@ void mhfu_ach_login(const char *user, const char *token) {
         rc_client_enable_logging(rc, RC_CLIENT_LOG_LEVEL_WARN, on_log);
         rc_client_set_event_handler(rc, on_event);
         rc_client_set_hardcore_enabled(rc, 0);
+#ifdef __ANDROID__
+        static struct rc_hash_filereader reader = { disc_open, disc_seek, disc_tell, disc_read, disc_close };
+        rc_hash_init_custom_filereader(&reader);
+#endif
         rc_hash_init_default_cdreader();
         g_rc = rc;
     } else {
