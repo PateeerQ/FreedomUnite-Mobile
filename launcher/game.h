@@ -29,5 +29,11 @@ bool game_running();
 void game_stop();               // closes the window (so the game reports), then forces it
 int  game_exit_code();          // of the last run; -1 while running or never run
 
+// The last crash's log (work/launcher/crash-latest.log: the run's log after a
+// header with the version, Windows and the exit code), kept whenever the game
+// ends with an error rather than by its window or the Stop button.
+std::string crash_log_path();
+std::string crash_log_text();   // "" when there is none
+
 // New log text since the last call (the whole log after a restart: `reset` true).
 std::string game_log_poll(bool &reset);

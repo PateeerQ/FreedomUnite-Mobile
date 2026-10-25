@@ -106,6 +106,25 @@ static std::string g_log_path;
 static uint64_t g_log_off;
 static bool g_log_reset;
 static int g_exit = -1;
+static bool g_stopping;         // the Stop button: an end, not a crash
+
+std::string crash_log_path() { return (P(paths::launcher()) / "crash-latest.log").u8string(); }
+
+std::string crash_log_text() { return file_exists(crash_log_path()) ? read_text(crash_log_path()) : std::string(); }
+
+// The run's log as the crash log, with what ended it on top.
+static void keep_crash_log(int code) {
+    char when[64];
+    std::time_t t = std::time(nullptr);
+    std::strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S", std::localtime(&t));
+    char head[256];
+    std::snprintf(head, sizeof head, "MHFU Recomp %s, Windows\ncrash: exit code 0x%08X\ntime: %s\n\n",
+                  LAUNCHER_VERSION, (unsigned)code, when);
+    std::error_code e;
+    fs::create_directories(P(paths::launcher()), e);
+    std::ofstream out(P(crash_log_path()), std::ios::binary);
+    out << head << read_text(g_log_path);
+}
 
 #ifdef _WIN32
 #include <windows.h>
@@ -219,8 +238,10 @@ bool game_start(const Config &c, std::string &err) {
         g_log_off = 0;
         g_log_reset = true;
         g_exit = -1;
+        g_stopping = false;
     }
-    // When it ends: its exit code, and the log kept under work/logs.
+    // When it ends: its exit code, and the log kept under work/logs (and as
+    // the crash log when it ended with an error).
     HANDLE h = pi.hProcess;
     std::thread([h] {
         WaitForSingleObject(h, INFINITE);
@@ -229,6 +250,7 @@ bool game_start(const Config &c, std::string &err) {
         std::lock_guard<std::mutex> l(g_lock);
         g_exit = (int)code;
         copy_logs();
+        if (code != 0 && !g_stopping) keep_crash_log((int)code);
         CloseHandle(h);
         if (g_proc == h) { g_proc = NULL; g_pid = 0; }
     }).detach();
@@ -262,6 +284,10 @@ void game_stop() {
         pid = g_pid;
     }
     if (!h) return;
+    {
+        std::lock_guard<std::mutex> l(g_lock);
+        g_stopping = true;
+    }
     EnumWindows(close_window, (LPARAM)pid);       // the window's close: the game writes its report
     std::thread([h] {
         if (WaitForSingleObject(h, 8000) == WAIT_TIMEOUT) TerminateProcess(h, 1);
