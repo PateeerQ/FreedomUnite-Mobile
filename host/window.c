@@ -60,9 +60,14 @@ static int  g_ntoasts;
  * and worst frametime, over the last half second. */
 static int    g_show_fps = 1;
 static char   g_fps_text[96] = "FPS --";
+static char   g_overlay_line[160];          /* the FPS line and/or the ping (stats.h) */
+static const char *overlay_line(void) {
+    mhfu_stats_overlay(g_show_fps, g_fps_text, g_overlay_line, sizeof g_overlay_line);
+    return g_overlay_line[0] ? g_overlay_line : NULL;
+}
 static void update_fps(void) {
     mhfu_stats_tick(GetTickCount64(), g_fps_text, sizeof g_fps_text);
-    if (g_gl) gl_overlay_text(g_show_fps ? g_fps_text : NULL);
+    if (g_gl) gl_overlay_text(overlay_line());
 }
 
 /* The key as input.ini names it: Shift, Ctrl and Alt as left or right. */
@@ -465,7 +470,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_KEYDOWN: case WM_SYSKEYDOWN:
         if (wp == VK_F3 && !(lp & (1 << 30))) {
             g_show_fps = !g_show_fps;
-            if (g_gl) gl_overlay_text(g_show_fps ? g_fps_text : NULL);
+            if (g_gl) gl_overlay_text(overlay_line());
             return 0;
         }
         if (!(lp & (1 << 30)) && (wp == VK_F11 || (wp == VK_RETURN && msg == WM_SYSKEYDOWN))) {
@@ -1001,7 +1006,7 @@ int mhfu_window_gl(void) {
     if (psp_render_gl_start(&host, g_scale) != 0) return -1;
     if (psp_render_select("gl") != 0) return -1;
     g_gl = 1;
-    gl_overlay_text(g_show_fps ? g_fps_text : NULL);
+    gl_overlay_text(overlay_line());
     return 0;
 }
 

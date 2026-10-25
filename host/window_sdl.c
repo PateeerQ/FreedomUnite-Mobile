@@ -23,6 +23,7 @@
 #include "input.h"
 #include "keys.h"
 #include "lobby.h"
+#include "net/client.h"
 #include "stats.h"
 
 #include <SDL3/SDL.h>
@@ -708,7 +709,7 @@ static void draw_editor(canvas *c, float s) {
  * Android dialogs (MhfuActivity, over JNI): they need text fields. */
 
 enum { R_HEAD, R_ITEM };
-enum { M_RESUME, M_NET, M_ACH, M_VPAD, M_EDIT, M_OPACITY, M_FPS, M_RES, M_FILES, M_UPDATE, M_ABOUT, M_EXIT };
+enum { M_RESUME, M_NET, M_ACH, M_VPAD, M_EDIT, M_OPACITY, M_FPS, M_RES, M_SAVES, M_FILES, M_CRASH, M_UPDATE, M_ABOUT, M_EXIT };
 typedef struct { int kind, id; const char *text; } menu_row;
 static const menu_row k_menu[] = {
     { R_HEAD, -1, "GAME" },     { R_ITEM, M_RESUME, "Back to game" },
@@ -720,7 +721,8 @@ static const menu_row k_menu[] = {
     { R_HEAD, -1, "DISPLAY" },  { R_ITEM, M_RES, "Resolution" }, { R_ITEM, M_FPS, "Show FPS" },
     { R_HEAD, -1, "APP" },
 #ifdef __ANDROID__
-    { R_ITEM, M_FILES, "Change game files" },
+    { R_ITEM, M_SAVES, "Save folder" },
+    { R_ITEM, M_FILES, "Change game files" }, { R_ITEM, M_CRASH, "Copy crash log" },
     { R_ITEM, M_UPDATE, "Check for updates" }, { R_ITEM, M_ABOUT, "About" },
 #endif
     { R_ITEM, M_EXIT, "Exit game" },
@@ -781,9 +783,14 @@ static const char *menu_value(int id) {
         return r;
     }
     case M_NET: {
-        static char code[8];
+        static char v[32];
+        char code[8];
         mhfu_lobby_code(code);
-        return code[0] ? code : "Offline";
+        const int ms = mhn_client_ping_ms();
+        if (!code[0]) return "Offline";
+        if (ms >= 0) snprintf(v, sizeof v, "%s  %d ms", code, ms);
+        else snprintf(v, sizeof v, "%s", code);
+        return v;
     }
     case M_ACH: {
         const char *u = mhfu_ach_user();
@@ -890,6 +897,8 @@ static void menu_tap(float px, float py, float w, float h) {
             case M_ACH: menu_set(0); android_call("openAchievements"); break;
             case M_ABOUT: menu_set(0); android_call("openAbout"); break;
             case M_FILES: menu_set(0); android_call("changeGameFiles"); break;
+            case M_CRASH: menu_set(0); android_call("copyCrashLog"); break;
+            case M_SAVES: menu_set(0); android_call("chooseSaveFolder"); break;
 #endif
             case M_OPACITY: g_vpad_alpha = g_vpad_alpha >= 100 ? 25 : g_vpad_alpha + 25; settings_save(); break;
             case M_EXIT: {
@@ -1087,7 +1096,9 @@ static int compose(void) {
         if (g_toasts[0].badge[0]) g_badge = stbi_load(g_toasts[0].badge, &g_badge_w, &g_badge_h, &n, 4);
     }
     const int box = SDL_GetAtomicInt(&g_tb_state) == 1;
-    const int fps = g_show_fps && g_font_ok;
+    char line[160];                                      /* the FPS line and/or the ping */
+    mhfu_stats_overlay(g_show_fps, g_fps_text, line, sizeof line);
+    const int fps = line[0] && g_font_ok;
     const chat_line *chat[CHAT_LINES];
     const int nchat = g_font_ok ? chat_visible(SDL_GetTicks(), chat) : 0;
     int ww = 0, wh = 0;
@@ -1115,9 +1126,9 @@ static int compose(void) {
             if (!g_menu_open) draw_menu_button(&c, s);
         }
         if (fps) {
-            const int fpx = (int)(14 * g_ui), fw = text_width(g_fps_text, fpx) + (int)(10 * g_ui), fh = fpx + (int)(8 * g_ui);
+            const int fpx = (int)(14 * g_ui), fw = text_width(line, fpx) + (int)(10 * g_ui), fh = fpx + (int)(8 * g_ui);
             fill(&c, 0, 0, fw, fh, rgba(0, 0, 0, 192));
-            text(&c, (int)(5 * g_ui), fpx + (int)(2 * g_ui), fpx, rgba(80, 255, 80, 255), g_fps_text, 0);
+            text(&c, (int)(5 * g_ui), fpx + (int)(2 * g_ui), fpx, rgba(80, 255, 80, 255), line, 0);
         }
         if (nchat) draw_chat(&c, (int)(6 * g_ui), (int)((fps ? 30 : 8) * g_ui), chat, nchat);
         if (showing) {
@@ -1132,7 +1143,7 @@ static int compose(void) {
         free(c.px);
         return showing || box || sliding;
     }
-    const int fpx = (int)(14 * g_ui), fw = fps ? text_width(g_fps_text, fpx) + (int)(10 * g_ui) : 0, fh = fps ? fpx + (int)(8 * g_ui) : 0;
+    const int fpx = (int)(14 * g_ui), fw = fps ? text_width(line, fpx) + (int)(10 * g_ui) : 0, fh = fps ? fpx + (int)(8 * g_ui) : 0;
     const int tw = (int)(440 * g_ui), th = (int)(116 * g_ui);
     canvas c = { NULL, fw, fh };
     if (showing) { c.w = ww; c.h = th + (int)(24 * g_ui) > c.h ? th + (int)(24 * g_ui) : c.h; }
@@ -1144,7 +1155,7 @@ static int compose(void) {
     if (!c.px) { SDL_UnlockMutex(g_lock); return 0; }
     if (fps) {
         fill(&c, 0, 0, fw, fh, rgba(0, 0, 0, 192));
-        text(&c, (int)(5 * g_ui), fpx + (int)(2 * g_ui), fpx, rgba(80, 255, 80, 255), g_fps_text, 0);
+        text(&c, (int)(5 * g_ui), fpx + (int)(2 * g_ui), fpx, rgba(80, 255, 80, 255), line, 0);
     }
     if (showing) draw_toast(&c, c.w - tw - (int)(20 * g_ui) + (int)((1 - in) * (tw + 30 * g_ui)), (int)(20 * g_ui), tw, th, &g_toasts[0]);
     if (nchat) draw_chat(&c, (int)(6 * g_ui), chy, chat, nchat);
