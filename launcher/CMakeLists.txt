@@ -31,6 +31,10 @@ set_target_properties(mhfu_launcher PROPERTIES
     CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>")
 if(WIN32)
+    # The crest: the exe's icon, and mhfu.png beside it for the About page.
+    target_sources(mhfu_launcher PRIVATE ${CMAKE_SOURCE_DIR}/assets/icon/mhfu.rc)
+    add_custom_command(TARGET mhfu_launcher POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_SOURCE_DIR}/assets/icon/mhfu.png $<TARGET_FILE_DIR:mhfu_launcher>/mhfu.png)
     target_link_libraries(mhfu_launcher PRIVATE opengl32 winhttp windowscodecs ole32 shell32)
     target_compile_definitions(mhfu_launcher PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
 endif()
