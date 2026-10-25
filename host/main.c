@@ -14,7 +14,7 @@
  * work/gen/, which is never committed.
  *
  *   mhfu_host <decrypted EBOOT> <root dir> [--iso FILE] [--budget N] [--seconds N]
- *             [--window [SCALE]] [--press SCRIPT] [--snap N] [--name NAME]
+ *             [--window [SCALE]] [--fullscreen] [--size WxH] [--keys INI] [--press SCRIPT] [--snap N] [--name NAME]
  *
  * --window shows the game and takes the keyboard (see window.c); closing it
  * ends the run. --press feeds timed button presses, counted in game frames
@@ -35,6 +35,7 @@
 #include "psprecomp/render.h"
 #include "psprecomp/vfpu.h"
 
+#include "achievements.h"
 #include "adhoc.h"
 #include "atrac.h"
 #include "mpeg.h"
@@ -55,6 +56,8 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <mmsystem.h>
+#pragma comment(lib, "winmm.lib")
 #else
 #include <pthread.h>
 #include <unistd.h>
@@ -333,13 +336,123 @@ static LONG WINAPI on_crash(EXCEPTION_POINTERS *ep) {
 }
 #endif
 
+/* Windows 11 throttles a process whose window is not in front: "efficiency
+ * mode" slows its CPU, and its 1 ms timer requests are ignored, so every
+ * scheduler wait stretches to the default 15.6 ms tick. Started from the
+ * launcher with the launcher's window on top, the game fell from 30 to about
+ * 12 fps at the title screen. This asks for the timer and opts out of both. */
+#ifdef _WIN32
+#ifndef PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION
+#define PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION 0x4
+#endif
+static void no_throttling(void) {
+    timeBeginPeriod(1);
+    PROCESS_POWER_THROTTLING_STATE s;
+    memset(&s, 0, sizeof s);
+    s.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+    s.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+    s.StateMask = 0;                     /* controlled, and off */
+    SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &s, sizeof s);
+}
+#endif
+
+#ifdef __ANDROID__
+/* SDLActivity starts the game with no arguments. Everything is in the app's
+ * external files directory (/sdcard/Android/data/com.pateeerq.mhfu/files,
+ * put there with adb push; android/README.md):
+ *   ULES01213_EBOOT.BIN   the decrypted EBOOT
+ *   *.iso                 the disc image (the first one found), or else
+ *   iso.txt               where the setup screen opened the chosen one:
+ *                         /proc/self/fd/N, read where it is
+ *   root/                 the device root: flash0/font (the PSP's fonts), ms (saves)
+ *   args.txt              more arguments, one per line (optional)
+ * and the log goes to run.log there. */
+#include <SDL3/SDL_system.h>
+#include <dirent.h>
+#include <unistd.h>
+static void android_args(int *argc, char ***argv) {
+    static char base[512], eboot[600], root[600], iso[800], log[600], extra[64][256];
+    static char *args[96];
+    const char *dir = SDL_GetAndroidExternalStoragePath();
+    snprintf(base, sizeof base, "%s", dir ? dir : "/sdcard/Android/data/com.pateeerq.mhfu/files");
+    snprintf(log, sizeof log, "%s/run.log", base);
+    /* One open file for both: two would each keep their own offset and
+     * write over each other. */
+    if (freopen(log, "w", stdout)) dup2(fileno(stdout), fileno(stderr));
+    setvbuf(stderr, NULL, _IONBF, 0);
+    /* The GL renderer: there is nothing else to see with on the phone. */
+    setenv("MHFU_RENDER", "gl", 0);
+    snprintf(eboot, sizeof eboot, "%s/ULES01213_EBOOT.BIN", base);
+    snprintf(root, sizeof root, "%s/root", base);
+    int n = 0;
+    args[n++] = (*argv)[0];
+    args[n++] = eboot;
+    args[n++] = root;
+    /* The disc SetupActivity checked (a path, or /proc/self/fd/N of the
+     * player's folder); else the first .iso pushed into the folder. */
+    {
+        char path[600];
+        snprintf(path, sizeof path, "%s/iso.txt", base);
+        FILE *t = fopen(path, "r");
+        if (t) {
+            if (fgets(iso, sizeof iso, t)) iso[strcspn(iso, "\r\n")] = 0;
+            fclose(t);
+        }
+    }
+    DIR *d = iso[0] ? NULL : opendir(base);
+    for (struct dirent *e; d && (e = readdir(d)) != NULL;) {
+        const size_t len = strlen(e->d_name);
+        if (len > 4 && !strcasecmp(e->d_name + len - 4, ".iso")) {
+            snprintf(iso, sizeof iso, "%s/%s", base, e->d_name);
+            break;
+        }
+    }
+    if (d) closedir(d);
+    static char opt_iso[] = "--iso", opt_win[] = "--window", scale[] = "2", opt_sec[] = "--seconds", sec[] = "864000";
+    if (iso[0]) { args[n++] = opt_iso; args[n++] = iso; }
+    args[n++] = opt_win; args[n++] = scale;
+    args[n++] = opt_sec; args[n++] = sec;
+    char path[600];
+    snprintf(path, sizeof path, "%s/args.txt", base);
+    FILE *f = fopen(path, "r");
+    for (int k = 0; f && k < 64 && n < 94 && fgets(extra[k], sizeof extra[k], f); k++) {
+        extra[k][strcspn(extra[k], "\r\n")] = 0;
+        if (extra[k][0] && extra[k][0] != '#') args[n++] = extra[k];
+    }
+    if (f) fclose(f);
+    args[n] = NULL;
+    printf("android: files in %s%s\n", base, iso[0] ? "" : " (no .iso there!)");
+    *argc = n;
+    *argv = args;
+}
+#endif
+
+#if MHFU_SDL_WINDOW
+/* SDL keeps the main thread for its window and events; the game runs on a
+ * thread of its own (window_sdl.c). On Android this is SDL_main. */
+#include <SDL3/SDL_main.h>
+static int game_main(int argc, char **argv);
 int main(int argc, char **argv) {
 #ifdef _WIN32
     SetUnhandledExceptionFilter(on_crash);
+    no_throttling();
+#endif
+    return mhfu_window_main(game_main, argc, argv);
+}
+static int game_main(int argc, char **argv) {
+#else
+int main(int argc, char **argv) {
+#ifdef _WIN32
+    SetUnhandledExceptionFilter(on_crash);
+    no_throttling();
+#endif
+#endif
+#ifdef __ANDROID__
+    if (argc < 3) android_args(&argc, &argv);
 #endif
     if (argc < 3) {
         fprintf(stderr, "usage: %s <decrypted EBOOT> <root dir> [--iso FILE] [--budget N] [--seconds N]"
-                " [--window [SCALE]] [--press SCRIPT] [--snap N] [--name NAME]\n"
+                " [--window [SCALE]] [--fullscreen] [--size WxH] [--keys INI] [--press SCRIPT] [--snap N] [--name NAME]\n"
                 "       multiplayer: [--net-create | --net-join CODE] [--net-pass 1234] [--nick NAME] [--mac 02:..] [--relay HOST[:PORT]]\n",
                 argv[0]);
         return 2;
@@ -353,7 +466,8 @@ int main(int argc, char **argv) {
     const char *iso = NULL, *press = NULL, *name = NULL;
     const char *nick = NULL, *mac = NULL, *relay = NULL, *net_join = NULL, *net_pass = NULL;
     unsigned long long budget = DEFAULT_BUDGET;
-    int window = 0, snap = 0, net_create = 0;
+    int window = 0, snap = 0, net_create = 0, fullscreen = 0, out_w = 0, out_h = 0;
+    const char *keys = getenv("MHFU_INPUT_INI");
     for (int i = 3; i < argc; i++) {
         int more = i + 1 < argc;
         if (!strcmp(argv[i], "--window")) {
@@ -361,6 +475,7 @@ int main(int argc, char **argv) {
             if (more && argv[i + 1][0] >= '1' && argv[i + 1][0] <= '9') window = atoi(argv[++i]);
         }
         else if (!strcmp(argv[i], "--net-create")) net_create = 1;
+        else if (!strcmp(argv[i], "--fullscreen")) fullscreen = 1;
         else if (!more) break;
         else if (!strcmp(argv[i], "--net-join")) net_join = argv[++i];
         else if (!strcmp(argv[i], "--net-pass")) net_pass = argv[++i];
@@ -373,6 +488,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--press"))   press = argv[++i];
         else if (!strcmp(argv[i], "--snap"))    snap = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--name"))    name = argv[++i];
+        else if (!strcmp(argv[i], "--size"))    sscanf(argv[++i], "%dx%d", &out_w, &out_h);
+        else if (!strcmp(argv[i], "--keys"))    keys = argv[++i];
     }
 
     size_t len = 0;
@@ -462,7 +579,14 @@ int main(int argc, char **argv) {
 
     if (window) {
         mhfu_window_on_close(on_window_closed);
+        mhfu_window_options(fullscreen, out_w, out_h, keys);
         if (mhfu_window_start(window) == 0) {
+            /* RetroAchievements, when the launcher signed the player in: the
+             * game is identified by its disc image; badges share the
+             * launcher's cache. */
+            char cache[600];
+            snprintf(cache, sizeof cache, "%s/../launcher/cache", g_root);
+            mhfu_ach_start(iso, cache);
             mhfu_input_set_pacing(1);
             if (renderer && !strcmp(renderer, "gl")) {
                 if (mhfu_window_gl() == 0) printf("renderer: OpenGL, %dx internal resolution\n", window);
