@@ -1,8 +1,8 @@
-# FreedomUniteRecompAndroid
+# FreedomUniteRecomp
 
 Monster Hunter Freedom Unite (PSP, EU `ULES01213`) statically recompiled to
 native code with [psprecomp](https://github.com/sp00nznet/psprecomp), on the
-way to a native Android port with PSP-style touch buttons and ad hoc
+way to a native PC and Android port with PSP-style touch buttons and ad hoc
 multiplayer through a private server.
 
 > **No game data here.** The ISO, the decrypted EBOOT, the extracted disc and
