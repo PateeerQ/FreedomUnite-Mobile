@@ -5,6 +5,7 @@ out/
 *.exe
 *.pdb
 *.ilk
+*.log
 
 # Everything made from the game: extracted disc, decrypted EBOOT, emitted C,
 # captures. Never committed.
