@@ -33,7 +33,7 @@ switched in when the game loads it; "tested" means someone has played through it
 |---|---|---|
 | CPU recompilation (Allegrex + VFPU) | ![85%](https://img.shields.io/badge/85%25-brightgreen?style=flat-square) | EBOOT and every overlay recompile; VFPU ops checked against PPSSPP as they turn up |
 | Game overlays, recompiled | ![100%](https://img.shields.io/badge/100%25-brightgreen?style=flat-square) | 298 of 298, extracted from DATA.BIN (`tools/re/databin.py`) |
-| Game overlays, tested in game | ![10%](https://img.shields.io/badge/10%25-orange?style=flat-square) | title, menus, character creation, village, house, Training School, Gathering Hall, game_task and a quest region |
+| Game overlays, tested in game | ![83%](https://img.shields.io/badge/83%25-brightgreen?style=flat-square) | most of the game played: menus, village, house, Training School, Gathering Hall, quests on most maps (estimate) |
 | System modules (firmware HLE) | ![70%](https://img.shields.io/badge/70%25-yellow?style=flat-square) | threads, I/O, UMD/ISO, display, ctrl, utility dialogs, savedata, libfont, sceMpeg, sceAtrac, sceNetAdhoc, Netconf; missing: encrypted saves, the sound PRX |
 | Graphics (GE + GL renderer) | ![70%](https://img.shields.io/badge/70%25-yellow?style=flat-square) | textures, lighting, fog, skinning, clipping, render-to-texture, GL 3.3 and GLES 3.0; missing: stencil, colour test, logic op, mipmaps, culling, DXT, specular, points/lines |
 | Audio | ![85%](https://img.shields.io/badge/85%25-brightgreen?style=flat-square) | sound effects, music (ATRAC3/3+ via FFmpeg), movie sound; small gaps while loading |
@@ -93,8 +93,10 @@ One player chooses **Create Server** (optionally with a 4-digit passcode); the
 others choose **Join Server** and pick the room (or type its code, `MH-4K7Q`).
 Then everyone goes online in the game as usual (the Gathering Hall). Rooms work
 on the same Wi-Fi or hotspot, between PCs and phones. On PC it is the game
-window's **Multiplayer** menu; on Android, the drawer. Over the internet a room
-needs a public `mhfu_hub` (`relay=host:port` in `<root>/net.cfg`).
+window's **Multiplayer** menu; on Android, the drawer. Rooms can also be made
+**over the internet** (Create Server → Internet) through the project's relay
+server, so players anywhere can join; nobody forwards a port. Another relay can
+be set with `relay=host:port` in `<root>/net.cfg`.
 
 ## Building
 
@@ -148,7 +150,7 @@ See [android/README.md](android/README.md).
 ```
 
 builds both and writes `release\v<version>\` (gitignored): the Windows zip
-(launcher, game, hub, FFmpeg, the Visual C++ runtime, a README) and the APK.
+(launcher, game, FFmpeg, the Visual C++ runtime, a README) and the APK.
 The version is `MHFU_VERSION` in `host/about.h` and `versionName` in
 `android/app/build.gradle`; they must match. The icon is drawn by
 `tools/make_icon.py`.
@@ -182,7 +184,6 @@ files). Keep that in mind before publishing them.
 | `seeds/eboot.txt`, `seeds/ov<hash>.txt` | functions only reached through a pointer built at run time |
 | `tools/re/databin.py` | decrypts DATA.BIN as the game does and extracts every overlay |
 | `tools/mhfu_ovl.c` | wraps an overlay as an ELF for `allegrexrecomp` |
-| `tools/mhfu_hub.c` | the standalone room hub, for a server reachable from the internet |
 | `tools/mhfu_netcheck.c` | end-to-end check of the room network without the game |
 | `tools/make_icon.py` | draws the app icon (Android mipmaps, `assets/icon/mhfu.ico`) |
 | `patches/psprecomp/` | fixes to psprecomp not upstream yet; `setup.ps1` applies them |
