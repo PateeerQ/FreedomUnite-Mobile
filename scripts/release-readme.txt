@@ -20,15 +20,19 @@ START
   J = Square, I = Triangle, Q/E = L/R, Enter = Start, V = Select (change them on
   the Keyboard page). DualSense, DualShock and Xbox controllers work too.
 
-  Multiplayer: in the game's window, Multiplayer > Create Server on one PC,
-  Join Server on the others (same network), then go online in the game.
+  Multiplayer: in the game's window, Multiplayer > Create Server on one PC
+  (Internet: players anywhere, or This network: same Wi-Fi), Join Server on
+  the others and pick the room (or type its code, MH-XXXX), then go online in
+  the game (Gathering Hall). PC and Android play together. No port forwarding.
+
+  Chat: while in a room, press SELECT (keyboard V/Backspace, controller
+  Create/Share), type, Enter. Lines show top-left; joins and leaves too.
 
   Saves are in work\root\ms\PSP\SAVEDATA (or work\profiles\<name>).
 
 FILES
   mhfu_launcher.exe   the launcher
   mhfu_host.exe       the game
-  mhfu_hub.exe        a room server, for playing over the internet (optional)
   *.dll               FFmpeg 7.1 (LGPL 2.1), for movies and music
 
 NOTICE

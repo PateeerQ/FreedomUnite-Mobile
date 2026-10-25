@@ -1,5 +1,5 @@
 # Packs a release into release\v<version>\ (gitignored):
-#   FreedomUniteRecomp-v<version>-windows-x64.zip   launcher, game, hub, FFmpeg, README
+#   FreedomUniteRecomp-v<version>-windows-x64.zip   launcher, game, FFmpeg, README
 #   FreedomUniteRecomp-v<version>-android-arm64.apk the release APK
 #
 #   .\scripts\release.ps1                   # builds first (Release + assembleRelease)
@@ -18,14 +18,17 @@ $gradleVersion = (Select-String -Path "$repo\android\app\build.gradle" -Pattern 
 if ($version -ne $gradleVersion) { throw "host/about.h says $version, android/app/build.gradle says ${gradleVersion}: make them the same" }
 
 if (-not $NoBuild) {
-    cmake --build "$repo\build" --config Release --target mhfu_host mhfu_launcher mhfu_hub
+    cmake --build "$repo\build" --config Release --target mhfu_host mhfu_launcher
     if ($LASTEXITCODE) { throw "the Windows build failed" }
     # AGP 8.7's Gradle runs on JDK 17-21; Android Studio's own JBR became 25. A JBR 21 under ~/.jdks first.
     $jdk = Get-ChildItem "$env:USERPROFILE\.jdks\jbr-21*", "$env:USERPROFILE\.jdks\*-21*" -Directory -ErrorAction SilentlyContinue |
         Where-Object { Test-Path "$($_.FullName)\bin\java.exe" } | Select-Object -First 1
     $env:JAVA_HOME = if ($jdk) { $jdk.FullName } else { "C:\Program Files\Android\Android Studio\jbr" }
-    Push-Location "$repo\android"
-    try { & .\gradlew.bat assembleRelease --console=plain } finally { Pop-Location }
+    # Gradle's warnings go to stderr, which Windows PowerShell takes for an error
+    # under ErrorActionPreference Stop: relaxed while it runs, the exit code decides.
+    $ErrorActionPreference = "Continue"
+    & "$repo\android\gradlew.bat" -p "$repo\android" assembleRelease --console=plain 2>&1 | ForEach-Object { "$_" }
+    $ErrorActionPreference = "Stop"
     if ($LASTEXITCODE) { throw "the Android build failed" }
 }
 
@@ -38,7 +41,7 @@ $stage = "$out\$name-windows-x64"
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory -Force "$stage\work\root\flash0\font" | Out-Null
 $bin = "$repo\build\Release"
-foreach ($f in "mhfu_launcher.exe", "mhfu_host.exe", "mhfu_hub.exe", "mhfu.png") { Copy-Item "$bin\$f" $stage }
+foreach ($f in "mhfu_launcher.exe", "mhfu_host.exe", "mhfu.png") { Copy-Item "$bin\$f" $stage }
 Get-ChildItem "$bin\*.dll" | Copy-Item -Destination $stage
 # The Visual C++ runtime, beside the exes (app-local), so no redistributable has to be installed.
 $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
