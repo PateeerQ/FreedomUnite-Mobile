@@ -36,6 +36,8 @@ typedef struct {
 typedef struct {
     int used;
     char code[MHN_CODE_LEN];
+    char pass[MHN_PASS_LEN];     /* "" when anyone may join */
+    char name[MHN_NAME_LEN];     /* for the list: whose room it is */
     uint64_t empty_since;        /* 0 while anyone is in it */
 } room;
 
@@ -98,12 +100,41 @@ static int new_room(mhn_hub *h) {
     return -1;
 }
 
-int mhn_hub_make_room(mhn_hub *h, char code[8]) {
+static void room_label(room *rm, const char *pass, const char *nick) {
+    snprintf(rm->pass, sizeof rm->pass, "%s", pass ? pass : "");
+    snprintf(rm->name, sizeof rm->name, "%.24s's room", nick && nick[0] ? nick : "Hunter");
+}
+
+int mhn_hub_make_room(mhn_hub *h, char code[8], const char *pass, const char *owner) {
     int r = new_room(h);
     if (r < 0) return -1;
+    room_label(&h->rooms[r], pass, owner);
     memcpy(code, h->rooms[r].code, MHN_CODE_LEN);
-    logf_("hub: room %s ready", code);
+    logf_("hub: room %s ready%s", code, h->rooms[r].pass[0] ? " (passcode)" : "");
     return 0;
+}
+
+static int room_members(mhn_hub *h, int r) {
+    int n = 0;
+    for (int i = 0; i < h->ncl; i++) if (!h->cl[i]->dead && h->cl[i]->room == r) n++;
+    return n;
+}
+
+/* The rooms anyone is in, as list entries; returns how many were written. */
+static int list_entries(mhn_hub *h, uint8_t *out, int max) {
+    int n = 0;
+    for (int r = 0; r < MAX_ROOMS && n < max; r++) {
+        if (!h->rooms[r].used) continue;
+        const int members = room_members(h, r);
+        if (!members) continue;
+        uint8_t *e = out + n * MHN_ENTRY_LEN;
+        memcpy(e, h->rooms[r].code, MHN_CODE_LEN);
+        memcpy(e + MHN_CODE_LEN, h->rooms[r].name, MHN_NAME_LEN);
+        e[MHN_CODE_LEN + MHN_NAME_LEN] = (uint8_t)members;
+        e[MHN_CODE_LEN + MHN_NAME_LEN + 1] = h->rooms[r].pass[0] ? 1 : 0;
+        n++;
+    }
+    return n;
 }
 
 /* ---- sending ---- */
@@ -235,17 +266,32 @@ static void hello(mhn_hub *h, client *c, const uint8_t *b, uint32_t len) {
         return;
     }
     int create = b[4];
-    char code[MHN_CODE_LEN];
+    char code[MHN_CODE_LEN], pass[MHN_PASS_LEN] = "";
     memcpy(code, b + 5, MHN_CODE_LEN);
     code[MHN_CODE_LEN - 1] = 0;
-    int r = -1;
-    if (create && h->open_rooms) r = new_room(h);
-    else r = find_room(h, code);
-    if (r < 0) { mhn_put32(w, MHN_NO_ROOM); send_frame(c, MHN_WELCOME, w, sizeof w); c->dead = 1; return; }
-
+    const uint32_t pass_at = 5 + MHN_CODE_LEN + 6 + MHN_NICK_LEN;
+    if (len >= pass_at + MHN_PASS_LEN) {
+        memcpy(pass, b + pass_at, MHN_PASS_LEN);
+        pass[MHN_PASS_LEN - 1] = 0;
+    }
     memcpy(c->mac, b + 5 + MHN_CODE_LEN, 6);
     memcpy(c->nick, b + 5 + MHN_CODE_LEN + 6, MHN_NICK_LEN);
     c->nick[MHN_NICK_LEN - 1] = 0;
+
+    int r = -1;
+    if (create && h->open_rooms) {
+        r = new_room(h);
+        if (r >= 0) room_label(&h->rooms[r], pass, c->nick);
+    } else {
+        r = find_room(h, code);
+    }
+    if (r < 0) { mhn_put32(w, MHN_NO_ROOM); send_frame(c, MHN_WELCOME, w, sizeof w); c->dead = 1; return; }
+    if (!create && h->rooms[r].pass[0] && strcmp(h->rooms[r].pass, pass) != 0) {
+        mhn_put32(w, MHN_BAD_PASSCODE);
+        send_frame(c, MHN_WELCOME, w, sizeof w);
+        c->dead = 1;
+        return;
+    }
     int members = 0;
     for (int i = 0; i < h->ncl; i++) {
         const client *o = h->cl[i];
@@ -276,7 +322,15 @@ static void hello(mhn_hub *h, client *c, const uint8_t *b, uint32_t len) {
     logf_("hub: %s (%s, %s) is in room %s, %d member(s)", c->nick, ms, c->ip, h->rooms[r].code, members + 1);
 }
 
+static void send_list(mhn_hub *h, client *c) {
+    static uint8_t b[4 + MHN_LIST_MAX * MHN_ENTRY_LEN];
+    const int n = list_entries(h, b + 4, MHN_LIST_MAX);
+    mhn_put32(b, (uint32_t)n);
+    send_frame(c, MHN_ROOM_LIST, b, 4 + (uint32_t)n * MHN_ENTRY_LEN);
+}
+
 static void handle(mhn_hub *h, client *c, int type, uint8_t *b, uint32_t len) {
+    if (c->room < 0 && type == MHN_LIST) { send_list(h, c); return; }
     if (c->room < 0 && type != MHN_HELLO) { c->dead = 1; return; }
     switch (type) {
     case MHN_HELLO:         if (c->room < 0) hello(h, c, b, len); break;
@@ -343,6 +397,15 @@ static void lan_query(mhn_hub *h) {
     uint32_t ip;
     uint16_t port;
     int n = net_udp_recvfrom(h->usock, b, sizeof b, &ip, &port);
+    if (n >= 4 && memcmp(b, "MHNL", 4) == 0) {             /* who has rooms here? */
+        static uint8_t r[4 + 2 + 1 + 16 * MHN_ENTRY_LEN];
+        memcpy(r, "MHNR", 4);
+        mhn_put16(r + 4, h->port);
+        const int k = list_entries(h, r + 7, 16);
+        r[6] = (uint8_t)k;
+        if (k) net_udp_sendto(h->usock, ip, port, r, 7 + (size_t)k * MHN_ENTRY_LEN);
+        return;
+    }
     if (n < 4 + MHN_CODE_LEN || memcmp(b, "MHN?", 4) != 0) return;
     char code[MHN_CODE_LEN];
     memcpy(code, b + 4, MHN_CODE_LEN);

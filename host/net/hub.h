@@ -14,8 +14,10 @@ typedef struct mhn_hub mhn_hub;
 mhn_hub *mhn_hub_new(uint16_t port, int lan, int open_rooms);
 uint16_t mhn_hub_port(const mhn_hub *h);
 
-/* A room made up front, for the in-app hub: its code is written to `code`. */
-int  mhn_hub_make_room(mhn_hub *h, char code[8]);
+/* A room made up front, for the in-app hub: its code is written to `code`.
+ * `pass` ("" or NULL for none) is the passcode a join must give; the room is
+ * listed as `owner`'s room. */
+int  mhn_hub_make_room(mhn_hub *h, char code[8], const char *pass, const char *owner);
 
 /* One pass: accept, read, route. Waits up to `timeout_ms` for something. */
 void mhn_hub_poll(mhn_hub *h, int timeout_ms);
