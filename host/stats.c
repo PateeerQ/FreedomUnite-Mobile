@@ -60,3 +60,15 @@ void mhfu_stats_tick(uint64_t now, char *fps_text, size_t cap) {
     last_flips = flips;
     last_ms = now;
 }
+
+void mhfu_stats_overlay(int show_fps, const char *fps_text, char *out, size_t cap) {
+    char ping[32] = "";
+    if (mhn_client_online()) {
+        const int ms = mhn_client_ping_ms();
+        if (ms >= 0) snprintf(ping, sizeof ping, "Ping %d ms", ms);
+        else snprintf(ping, sizeof ping, "Ping --");
+    }
+    if (show_fps && ping[0]) snprintf(out, cap, "%s   %s", fps_text, ping);
+    else if (show_fps) snprintf(out, cap, "%s", fps_text);
+    else snprintf(out, cap, "%s", ping);
+}

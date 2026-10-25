@@ -12,4 +12,8 @@
  * ad hoc traffic. */
 void mhfu_stats_tick(uint64_t now_ms, char *fps_text, size_t cap);
 
+/* What the windows show top-left: the FPS line (when `show_fps`), and the
+ * ping while in a room ("Ping 45 ms"), together or alone; "" for nothing. */
+void mhfu_stats_overlay(int show_fps, const char *fps_text, char *out, size_t cap);
+
 #endif
