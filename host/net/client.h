@@ -24,6 +24,9 @@ int  mhn_client_start(const char *host, uint16_t port, int create, const char *c
 void mhn_client_stop(void);
 /* 1 while in a room. A lost connection drops back to 0. */
 int  mhn_client_online(void);
+/* The round trip to the hub (the relay, or the LAN host), in ms, smoothed;
+ * -1 before the first answer or with a hub too old to answer. */
+int  mhn_client_ping_ms(void);
 /* The room's code ("MH-4K7Q"), or "" when not in one. */
 void mhn_client_code(char code[MHN_CODE_LEN]);
 void mhn_client_mac(uint8_t mac[6]);

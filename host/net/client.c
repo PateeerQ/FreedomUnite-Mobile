@@ -16,7 +16,7 @@
 #define PDP_QUEUE_MAX   (256 * 1024)   /* bytes held per PDP socket before dropping */
 #define PTP_BUF_MAX     (1024 * 1024)
 #define PTP_BACKLOG_MAX 16
-#define PING_MS         10000
+#define PING_MS         2000           /* a ping, with the time, for the round trip (and the NATs) */
 
 #define CHAT_QUEUE      32              /* lines that came in, waiting for chat.c */
 
@@ -77,6 +77,7 @@ static struct {
     struct { char nick[MHN_NICK_LEN]; char text[MHN_CHAT_MAX + 1]; int joined; } chat[CHAT_QUEUE];
     int nchat;
     uint64_t online_ms;          /* when this player came into the room */
+    volatile int rtt_ms;         /* the round trip to the hub, smoothed; -1 not known */
 } g;
 
 /* Datagrams in, read by the game, dropped; and how long the read ones waited. */
@@ -300,6 +301,16 @@ static void on_frame(int type, const uint8_t *b, uint32_t len) {
     case MHN_PTP_DATA: case MHN_PTP_FIN:
         on_traffic(type, b, len);
         break;
+    case MHN_PONG:
+        if (len >= 8) {
+            const uint64_t sent = (uint64_t)mhn_get32(b) | (uint64_t)mhn_get32(b + 4) << 32;
+            const uint64_t now = net_now_ms();
+            if (now >= sent && now - sent < 60000) {
+                const int r = (int)(now - sent);
+                g.rtt_ms = g.rtt_ms < 0 ? r : (g.rtt_ms * 3 + r) / 4;
+            }
+        }
+        break;
     case MHN_CHAT:
         if (len > 6 + MHN_NICK_LEN) chat_push(b + 6, b + 6 + MHN_NICK_LEN, len - 6 - MHN_NICK_LEN, 0);
         break;
@@ -317,7 +328,13 @@ static void reader(void *arg) {
     while (buf && !g.stop) {
         uint8_t ready;
         int k = net_poll(&g.s, 1, &ready, 200);
-        if (net_now_ms() - last_ping > PING_MS) { send_frame(MHN_PING, NULL, 0); last_ping = net_now_ms(); }
+        if (net_now_ms() - last_ping > PING_MS) {
+            last_ping = net_now_ms();
+            uint8_t t[8];
+            mhn_put32(t, (uint32_t)last_ping);
+            mhn_put32(t + 4, (uint32_t)(last_ping >> 32));
+            send_frame(MHN_PING, t, sizeof t);
+        }
         if (k <= 0) { if (k < 0) break; continue; }
         int n = net_recv(g.s, buf + len, cap - len);
         if (n <= 0) break;
@@ -394,6 +411,7 @@ int mhn_client_start(const char *host, uint16_t port, int create, const char *co
     g.nmembers = g.npeers = g.nscan = g.nev = g.nchat = 0;
     g.in_group = 0;
     g.online_ms = net_now_ms();
+    g.rtt_ms = -1;
     g.online = 1;
     g.stop = 0;
     net_unlock(g.lock);
@@ -414,6 +432,8 @@ void mhn_client_stop(void) {
 }
 
 int mhn_client_online(void) { return g.online; }
+
+int mhn_client_ping_ms(void) { return g.online ? g.rtt_ms : -1; }
 
 void mhn_client_code(char code[MHN_CODE_LEN]) {
     ensure_locks();
