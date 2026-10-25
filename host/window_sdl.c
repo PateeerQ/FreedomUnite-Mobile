@@ -283,6 +283,7 @@ static float   g_touch_rx, g_touch_ry;                  /* the right stick's kno
 static int     g_touch_rheld;
 static SDL_AtomicInt g_touch_btn_atomic, g_touch_stick_atomic;  /* for the game thread */
 static SDL_AtomicInt g_remake;                       /* the surface changed: the render thread rebinds */
+static SDL_AtomicInt g_background;                   /* the app is in the background: no drawing */
 
 /* A group's place when it has been moved: its centre as fractions of the
  * screen, and its size against the default. */
@@ -304,6 +305,11 @@ static int vpad_visible(void) {
 #endif
 }
 
+/* The internal resolution the player chose in the menu (1-4 times 480x272;
+ * 0: what the game was started with). The renderer takes it when it starts,
+ * so a change shows after a restart. */
+static int g_res_setting;
+
 static char g_settings_path[1024];
 static void settings_load(void) {
     char *pref = SDL_GetPrefPath("PateeerQ", "MHFU");
@@ -319,6 +325,7 @@ static void settings_load(void) {
         if (sscanf(line, "virtual_gamepad=%d", &v) == 1 && v >= 0 && v <= 2) g_vpad_mode = v;
         if (sscanf(line, "show_fps=%d", &v) == 1) g_show_fps_init = v;
         if (sscanf(line, "button_opacity=%d", &v) == 1 && v >= 10 && v <= 100) g_vpad_alpha = v;
+        if (sscanf(line, "resolution=%d", &v) == 1 && v >= 1 && v <= 4) g_res_setting = v;
         if (sscanf(line, "layout_%31[a-z]=%f,%f,%f", name, &x, &y, &k) == 4)
             for (int g = 0; g < G_COUNT; g++)
                 if (!strcmp(name, k_group_name[g])) g_place[g] = (placed){ 1, x, y, k };
@@ -330,6 +337,7 @@ static void settings_save(void) {
     if (!f) return;
     fprintf(f, "# MHFU: the in-game menu's settings\nvirtual_gamepad=%d\nshow_fps=%d\nbutton_opacity=%d\n",
             g_vpad_mode, g_show_fps_init, g_vpad_alpha);
+    if (g_res_setting) fprintf(f, "resolution=%d\n", g_res_setting);
     for (int g = 0; g < G_COUNT; g++)
         if (g_place[g].set)
             fprintf(f, "layout_%s=%.4f,%.4f,%.3f\n", k_group_name[g], g_place[g].cx, g_place[g].cy, g_place[g].k);
@@ -700,7 +708,7 @@ static void draw_editor(canvas *c, float s) {
  * Android dialogs (MhfuActivity, over JNI): they need text fields. */
 
 enum { R_HEAD, R_ITEM };
-enum { M_RESUME, M_NET, M_ACH, M_VPAD, M_EDIT, M_OPACITY, M_FPS, M_UPDATE, M_ABOUT, M_EXIT };
+enum { M_RESUME, M_NET, M_ACH, M_VPAD, M_EDIT, M_OPACITY, M_FPS, M_RES, M_FILES, M_UPDATE, M_ABOUT, M_EXIT };
 typedef struct { int kind, id; const char *text; } menu_row;
 static const menu_row k_menu[] = {
     { R_HEAD, -1, "GAME" },     { R_ITEM, M_RESUME, "Back to game" },
@@ -708,9 +716,11 @@ static const menu_row k_menu[] = {
     { R_HEAD, -1, "ONLINE" },   { R_ITEM, M_NET, "Multiplayer" }, { R_ITEM, M_ACH, "RetroAchievements" },
 #endif
     { R_HEAD, -1, "CONTROLS" }, { R_ITEM, M_VPAD, "Virtual gamepad" }, { R_ITEM, M_EDIT, "Edit button layout" },
-    { R_ITEM, M_OPACITY, "Button opacity" }, { R_ITEM, M_FPS, "Show FPS" },
+    { R_ITEM, M_OPACITY, "Button opacity" },
+    { R_HEAD, -1, "DISPLAY" },  { R_ITEM, M_RES, "Resolution" }, { R_ITEM, M_FPS, "Show FPS" },
     { R_HEAD, -1, "APP" },
 #ifdef __ANDROID__
+    { R_ITEM, M_FILES, "Change game files" },
     { R_ITEM, M_UPDATE, "Check for updates" }, { R_ITEM, M_ABOUT, "About" },
 #endif
     { R_ITEM, M_EXIT, "Exit game" },
@@ -764,6 +774,12 @@ static const char *menu_value(int id) {
     switch (id) {
     case M_VPAD: return vp[g_vpad_mode];
     case M_FPS: return g_show_fps ? "On" : "Off";
+    case M_RES: {
+        static char r[40];
+        const int want = g_res_setting ? g_res_setting : g_scale;
+        snprintf(r, sizeof r, want == g_scale ? "%dx (%dp)" : "%dx (%dp), restart", want, PSP_H * want);
+        return r;
+    }
     case M_NET: {
         static char code[8];
         mhfu_lobby_code(code);
@@ -866,12 +882,14 @@ static void menu_tap(float px, float py, float w, float h) {
             case M_RESUME: menu_set(0); break;
             case M_VPAD: g_vpad_mode = (g_vpad_mode + 1) % 3; settings_save(); break;
             case M_FPS: g_show_fps = !g_show_fps; g_show_fps_init = g_show_fps; settings_save(); break;
+            case M_RES: g_res_setting = (g_res_setting ? g_res_setting : g_scale) % 4 + 1; settings_save(); break;
             case M_EDIT: menu_set(0); edit_open(); break;
 #ifdef __ANDROID__
             case M_UPDATE: menu_set(0); android_call("checkUpdates"); break;
             case M_NET: menu_set(0); android_call("openMultiplayer"); break;
             case M_ACH: menu_set(0); android_call("openAchievements"); break;
             case M_ABOUT: menu_set(0); android_call("openAbout"); break;
+            case M_FILES: menu_set(0); android_call("changeGameFiles"); break;
 #endif
             case M_OPACITY: g_vpad_alpha = g_vpad_alpha >= 100 ? 25 : g_vpad_alpha + 25; settings_save(); break;
             case M_EXIT: {
@@ -988,6 +1006,64 @@ static void draw_textbox(canvas *c) {
          "Enter: OK    Escape: cancel", w - (int)(44 * u));
 }
 
+/* ---- the room's chat (chat.c) ----------------------------------------------------------
+ *
+ * The last few lines, top-left under the FPS line, each for CHAT_SHOW_MS (all
+ * of them while the text box is open). Under g_lock; the half-second stats
+ * tick recomposes, which ends them. */
+
+#define CHAT_LINES   8
+#define CHAT_SHOW_MS 12000
+typedef struct { char nick[48], text[256]; int self; uint64_t t; } chat_line;
+static chat_line g_chat[CHAT_LINES];
+static int       g_nchat;
+
+static int chat_visible(uint64_t now, const chat_line **out) {
+    const int all = SDL_GetAtomicInt(&g_tb_state) == 1;
+    int n = 0;
+    for (int i = 0; i < g_nchat; i++)
+        if (all || now - g_chat[i].t < CHAT_SHOW_MS) out[n++] = &g_chat[i];
+    return n;
+}
+
+static int chat_line_h(void) { return (int)(24 * g_ui); }
+
+static void draw_chat(canvas *c, int x, int y, const chat_line *const *lines, int n) {
+    const int lh = chat_line_h(), px = (int)(15 * g_ui);
+    const int w = (int)(520 * g_ui) < c->w - x - (int)(8 * g_ui) ? (int)(520 * g_ui) : c->w - x - (int)(8 * g_ui);
+    for (int i = 0; i < n; i++, y += lh) {
+        const chat_line *l = lines[i];
+        fill(c, x, y, w, lh, rgba(20, 15, 11, 210));
+        int tx = x + (int)(8 * g_ui);
+        const int base = y + lh - (int)(7 * g_ui);
+        if (l->self != 2) {                             /* "Name:" in gold (green for mine) */
+            char who[64];
+            snprintf(who, sizeof who, "%s:", l->nick);
+            const int nw = text_width(who, px) < w / 2 ? text_width(who, px) : w / 2;
+            text(c, tx, base, px, l->self ? rgba(150, 225, 120, 255) : rgba(236, 194, 104, 255), who, w / 2);
+            tx += nw + (int)(6 * g_ui);
+        }
+        text(c, tx, base, px, l->self == 2 ? rgba(205, 192, 168, 255) : rgba(252, 247, 237, 255), l->text,
+             x + w - (int)(6 * g_ui) - tx);
+    }
+}
+
+void mhfu_window_chat(const char *nick, const char *text, int self) {
+    if (!g_lock) return;
+    SDL_LockMutex(g_lock);
+    if (g_nchat == CHAT_LINES) memmove(g_chat, g_chat + 1, sizeof g_chat[0] * (--g_nchat));
+    chat_line *l = &g_chat[g_nchat++];
+    snprintf(l->nick, sizeof l->nick, "%s", nick ? nick : "");
+    snprintf(l->text, sizeof l->text, "%s", text ? text : "");
+    l->self = self;
+    l->t = SDL_GetTicks();
+    SDL_UnlockMutex(g_lock);
+    SDL_Event e;
+    SDL_zero(e);
+    e.type = g_ev_wake;                                  /* recompose */
+    SDL_PushEvent(&e);
+}
+
 /* ---- composing the overlay (on the loop's thread) --------------------------------------- */
 
 static char g_fps_text[96] = "FPS --";
@@ -1012,6 +1088,8 @@ static int compose(void) {
     }
     const int box = SDL_GetAtomicInt(&g_tb_state) == 1;
     const int fps = g_show_fps && g_font_ok;
+    const chat_line *chat[CHAT_LINES];
+    const int nchat = g_font_ok ? chat_visible(SDL_GetTicks(), chat) : 0;
     int ww = 0, wh = 0;
     SDL_GetWindowSizeInPixels(g_window, &ww, &wh);
 #ifdef __ANDROID__
@@ -1041,6 +1119,7 @@ static int compose(void) {
             fill(&c, 0, 0, fw, fh, rgba(0, 0, 0, 192));
             text(&c, (int)(5 * g_ui), fpx + (int)(2 * g_ui), fpx, rgba(80, 255, 80, 255), g_fps_text, 0);
         }
+        if (nchat) draw_chat(&c, (int)(6 * g_ui), (int)((fps ? 30 : 8) * g_ui), chat, nchat);
         if (showing) {
             const int tw = (int)(440 * g_ui), th = (int)(116 * g_ui);
             draw_toast(&c, c.w - tw - (int)(20 * g_ui) + (int)((1 - in) * (tw + 30 * g_ui)), (int)(20 * g_ui), tw, th, &g_toasts[0]);
@@ -1058,6 +1137,8 @@ static int compose(void) {
     canvas c = { NULL, fw, fh };
     if (showing) { c.w = ww; c.h = th + (int)(24 * g_ui) > c.h ? th + (int)(24 * g_ui) : c.h; }
     if (box) { c.w = ww; c.h = (int)(230 * g_ui) > c.h ? (int)(230 * g_ui) : c.h; }
+    const int chy = fh + (int)(6 * g_ui);
+    if (nchat) { c.w = ww; c.h = chy + nchat * chat_line_h() > c.h ? chy + nchat * chat_line_h() : c.h; }
     if (c.w <= 0 || c.h <= 0) { SDL_UnlockMutex(g_lock); psp_render_gl_overlay(NULL, 0, 0); return 0; }
     c.px = (uint32_t *)calloc((size_t)c.w * c.h, 4);
     if (!c.px) { SDL_UnlockMutex(g_lock); return 0; }
@@ -1066,6 +1147,7 @@ static int compose(void) {
         text(&c, (int)(5 * g_ui), fpx + (int)(2 * g_ui), fpx, rgba(80, 255, 80, 255), g_fps_text, 0);
     }
     if (showing) draw_toast(&c, c.w - tw - (int)(20 * g_ui) + (int)((1 - in) * (tw + 30 * g_ui)), (int)(20 * g_ui), tw, th, &g_toasts[0]);
+    if (nchat) draw_chat(&c, (int)(6 * g_ui), chy, chat, nchat);
     if (box) draw_textbox(&c);
     SDL_UnlockMutex(g_lock);
     psp_render_gl_overlay(c.px, c.w, c.h);
@@ -1172,8 +1254,42 @@ static void gl_swap(void *user) {
      * app is back can come before Android has the new surface ready (coming
      * back from the setup screen or the home screen left the game running
      * into a surface that was gone: a black screen). */
-    if (SDL_GetAtomicInt(&g_remake) && SDL_GL_MakeCurrent(g_window, g_ctx)) SDL_SetAtomicInt(&g_remake, 0);
+    /* In the background the render thread lets go of the surface (Android
+     * destroys it) and waits: drawing on would go nowhere, and a context still
+     * bound to the old surface is how the game came back to a black screen.
+     * The game waits for its frames meanwhile, as it would paused. */
+    if (SDL_GetAtomicInt(&g_background)) {
+        SDL_GL_MakeCurrent(g_window, NULL);
+        printf("window: in the background, drawing paused\n");
+        while (SDL_GetAtomicInt(&g_background) && !SDL_GetAtomicInt(&g_closed)) SDL_Delay(50);
+        printf("window: back in the foreground\n");
+        SDL_SetAtomicInt(&g_remake, 1);
+        return;
+    }
+    static int tries;
+    if (SDL_GetAtomicInt(&g_remake)) {
+        if (SDL_GL_MakeCurrent(g_window, g_ctx)) {
+            if (tries) printf("window: GL bound to the new surface after %d tries\n", tries + 1);
+            SDL_SetAtomicInt(&g_remake, 0);
+            tries = 0;
+        } else if (tries++ % 60 == 0) {
+            printf("window: GL cannot bind the surface yet (%s)\n", SDL_GetError());
+        }
+    }
     if (!SDL_GL_SwapWindow(g_window)) SDL_SetAtomicInt(&g_remake, 1);
+}
+
+/* Called as each event is queued, on whichever thread queues it: Android's
+ * pause and resume come on its own thread while the loop may be blocked. */
+static bool SDLCALL app_events(void *user, SDL_Event *e) {
+    (void)user;
+    if (e->type == SDL_EVENT_WILL_ENTER_BACKGROUND || e->type == SDL_EVENT_DID_ENTER_BACKGROUND) {
+        SDL_SetAtomicInt(&g_background, 1);
+    } else if (e->type == SDL_EVENT_WILL_ENTER_FOREGROUND || e->type == SDL_EVENT_DID_ENTER_FOREGROUND) {
+        SDL_SetAtomicInt(&g_background, 0);
+        SDL_SetAtomicInt(&g_remake, 1);
+    }
+    return true;
 }
 static void gl_size(void *user, int *w, int *h) { (void)user; SDL_GetWindowSizeInPixels(g_window, w, h); }
 
@@ -1194,7 +1310,7 @@ static void wake(Uint32 type) {
 }
 
 int mhfu_window_start(int scale) {
-    g_scale = scale > 0 ? scale : 2;
+    g_scale = g_res_setting ? g_res_setting : scale > 0 ? scale : 2;   /* the menu's choice wins */
     SDL_LockMutex(g_lock);
     g_window_state = 0;
     wake(g_ev_window);
@@ -1371,6 +1487,7 @@ int mhfu_window_main(int (*game)(int, char **), int argc, char **argv) {
     g_lock = SDL_CreateMutex();
     g_cond = SDL_CreateCondition();
     g_ev_window = SDL_RegisterEvents(2);
+    SDL_AddEventWatch(app_events, NULL);
     g_ev_wake = g_ev_window + 1;
     SDL_SetAtomicInt(&g_stick, 0);
     SDL_SetAtomicInt(&g_touch_stick_atomic, -1);

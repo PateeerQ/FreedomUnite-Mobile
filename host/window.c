@@ -130,6 +130,7 @@ static void grab(void) {
 enum {
     ID_CREATE = 100, ID_JOIN, ID_LEAVE, ID_ABOUT,
     ID_DLG_OK, ID_DLG_CANCEL, ID_PASS_EDIT, ID_CODE_EDIT, ID_ROOM_LIST, ID_REFRESH, ID_TEXT_EDIT,
+    ID_WHERE_NET, ID_WHERE_LAN,
 };
 #define WM_LOBBY_DONE (WM_APP + 1)
 #define WM_ROOMS_DONE (WM_APP + 2)
@@ -139,13 +140,14 @@ static volatile LONG g_lobby_busy;
 static char          g_lobby_err[256];
 static char          g_join_code[16];
 static char          g_pass[8];
+static int           g_internet;          /* Create Server: on the relay */
 
 /* Create and join can take a few seconds (finding the room on the LAN), so
  * they run on a thread of their own and post back when done. */
 static DWORD WINAPI lobby_worker(LPVOID arg) {
     int create = (int)(INT_PTR)arg;
     g_lobby_err[0] = 0;
-    int r = create ? mhfu_lobby_create(g_pass, g_lobby_err, sizeof g_lobby_err)
+    int r = create ? mhfu_lobby_create(g_pass, g_internet, g_lobby_err, sizeof g_lobby_err)
                    : mhfu_lobby_join(g_join_code, g_pass, g_lobby_err, sizeof g_lobby_err);
     PostMessageA(g_main, WM_LOBBY_DONE, (WPARAM)r, (LPARAM)create);
     return 0;
@@ -182,21 +184,28 @@ static int read_pass(HWND d) {
     return -1;
 }
 
-/* Create Server: the passcode, if any. */
+/* Create Server: where (the internet or this network) and the passcode, if any. */
 static LRESULT CALLBACK create_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE: {
-        control(h, "STATIC", "Passcode (4 digits), or empty for a public room:", 0, 12, 12, 300, 18, 0, 0);
-        HWND e = control(h, "EDIT", "", WS_TABSTOP | ES_NUMBER, 12, 34, 120, 24, ID_PASS_EDIT, WS_EX_CLIENTEDGE);
+        const int relay = mhfu_lobby_has_relay(), y = relay ? 32 : 0;
+        if (relay) {
+            HWND n = control(h, "BUTTON", "Internet", WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON, 12, 10, 100, 20, ID_WHERE_NET, 0);
+            control(h, "BUTTON", "This network (LAN)", BS_AUTORADIOBUTTON, 120, 10, 190, 20, ID_WHERE_LAN, 0);
+            SendMessageA(n, BM_SETCHECK, BST_CHECKED, 0);
+        }
+        control(h, "STATIC", "Passcode (4 digits), or empty for a public room:", WS_GROUP, 12, 12 + y, 300, 18, 0, 0);
+        HWND e = control(h, "EDIT", "", WS_TABSTOP | ES_NUMBER, 12, 34 + y, 120, 24, ID_PASS_EDIT, WS_EX_CLIENTEDGE);
         SendMessageA(e, EM_SETLIMITTEXT, 4, 0);
-        control(h, "BUTTON", "Create", WS_TABSTOP | BS_DEFPUSHBUTTON, 150, 70, 78, 26, ID_DLG_OK, 0);
-        control(h, "BUTTON", "Cancel", WS_TABSTOP, 234, 70, 78, 26, ID_DLG_CANCEL, 0);
+        control(h, "BUTTON", "Create", WS_TABSTOP | BS_DEFPUSHBUTTON, 150, 70 + y, 78, 26, ID_DLG_OK, 0);
+        control(h, "BUTTON", "Cancel", WS_TABSTOP, 234, 70 + y, 78, 26, ID_DLG_CANCEL, 0);
         SetFocus(e);
         return 0;
     }
     case WM_COMMAND:
         if (LOWORD(wp) == ID_DLG_OK || LOWORD(wp) == IDOK) {
             if (read_pass(h) != 0) return 0;
+            g_internet = mhfu_lobby_has_relay() && IsDlgButtonChecked(h, ID_WHERE_NET) == BST_CHECKED;
             DestroyWindow(h);
             lobby_start(1);
         } else if (LOWORD(wp) == ID_DLG_CANCEL || LOWORD(wp) == IDCANCEL) {
@@ -406,7 +415,7 @@ int mhfu_window_text_result(uint16_t *out, int cap) {
     return n;
 }
 
-static void ask_create(void) { open_dialog("mhfu_create", create_proc, "Create Server", 324, 108); }
+static void ask_create(void) { open_dialog("mhfu_create", create_proc, "Create Server", 324, mhfu_lobby_has_relay() ? 140 : 108); }
 static void ask_join(void)   { open_dialog("mhfu_join", join_proc, "Join Server", 420, 292); }
 
 static HMENU make_menu(void) {
@@ -435,7 +444,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_ASK_TEXT:
-        if (!open_dialog("mhfu_text", text_proc, "Keyboard", 324, 108))
+        if (!open_dialog("mhfu_text", text_proc, strncmp(g_text_prompt, "Chat", 4) ? "Keyboard" : "Chat", 324, 108))
             InterlockedExchange(&g_text_state, 3);   /* the box did not open */
         return 0;
     case WM_LOBBY_DONE: {
@@ -689,6 +698,17 @@ static uint32_t        *g_badge;             /* the showing toast's badge, BGRA 
 static int              g_badge_w, g_badge_h, g_badge_loaded;
 static const char      *g_fps_shown;         /* what gl_overlay_text was last given */
 
+/* The room's chat (chat.c): the last few lines, top-left under the FPS line,
+ * each for CHAT_SHOW_MS (all of them while the chat box is open). Under the
+ * toasts' lock; the FPS timer recomposes twice a second, which ends them. */
+#define CHAT_LINES   8
+#define CHAT_SHOW_MS 12000
+#define CHAT_W       520
+#define CHAT_LINE_H  22
+typedef struct { char nick[48], text[256]; int self; ULONGLONG t; } chat_line;
+static chat_line g_chat[CHAT_LINES];
+static int       g_nchat;
+
 static void toast_lock(void) {
     if (InterlockedCompareExchange(&g_toast_lock_state, 1, 0) == 0) {
         InitializeCriticalSection(&g_toast_lock);
@@ -815,10 +835,54 @@ static int toast_phase(ULONGLONG now, float *in) {
     return 1;
 }
 
+/* The chat lines to show now, oldest first; how many. Under the lock. */
+static int chat_visible(ULONGLONG now, const chat_line **out) {
+    const int all = g_text_state == 1;
+    int n = 0;
+    for (int i = 0; i < g_nchat; i++)
+        if (all || now - g_chat[i].t < CHAT_SHOW_MS) out[n++] = &g_chat[i];
+    return n;
+}
+
+static void draw_chat(HDC dc, int x, int y, const chat_line *const *lines, int n) {
+    HFONT fb = font(15, FW_BOLD, L"Segoe UI"), fn = font(15, FW_NORMAL, L"Segoe UI");
+    HGDIOBJ of = SelectObject(dc, fb);
+    HBRUSH bg = CreateSolidBrush(RGB(20, 15, 11));
+    SetBkMode(dc, TRANSPARENT);
+    for (int i = 0; i < n; i++, y += CHAT_LINE_H) {
+        const chat_line *l = lines[i];
+        RECT r = { x, y, x + CHAT_W, y + CHAT_LINE_H };
+        FillRect(dc, &r, bg);
+        int tx = x + 8;
+        if (l->self != 2) {                            /* "Name:" in gold (green for mine) */
+            char who[64];
+            snprintf(who, sizeof who, "%s:", l->nick);
+            wchar_t ww[64];
+            SIZE sz = { 0, 0 };
+            SelectObject(dc, fb);                      /* measured in the font it is drawn in */
+            if (MultiByteToWideChar(CP_UTF8, 0, who, -1, ww, 64)) GetTextExtentPoint32W(dc, ww, (int)wcslen(ww), &sz);
+            SetTextColor(dc, l->self ? RGB(150, 225, 120) : RGB(236, 194, 104));
+            RECT rn = { tx, y + 2, x + CHAT_W / 2, y + CHAT_LINE_H };
+            text_utf8(dc, who, &rn, DT_SINGLELINE | DT_END_ELLIPSIS);
+            tx += (sz.cx < CHAT_W / 2 - 8 ? sz.cx : CHAT_W / 2 - 8) + 6;
+        }
+        SelectObject(dc, fn);
+        SetTextColor(dc, l->self == 2 ? RGB(205, 192, 168) : RGB(252, 247, 237));
+        RECT rt = { tx, y + 2, x + CHAT_W - 6, y + CHAT_LINE_H };
+        text_utf8(dc, l->text, &rt, DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+    SelectObject(dc, of);
+    DeleteObject(bg);
+    DeleteObject(fb);
+    DeleteObject(fn);
+}
+
 static void compose_overlay(void) {
     if (!g_gl) return;
     const char *text = g_fps_shown;
     toast_lock();
+    const chat_line *chat[CHAT_LINES];
+    const int nchat = chat_visible(GetTickCount64(), chat);
     float in = 0;
     int showing = toast_phase(GetTickCount64(), &in);
     while (showing < 0) {                              /* the next toast, with its badge */
@@ -833,7 +897,7 @@ static void compose_overlay(void) {
         g_badge_loaded = 1;
         if (g_toasts[0].badge[0]) g_badge = load_png(g_toasts[0].badge, &g_badge_w, &g_badge_h);
     }
-    if (!showing && !text) { toast_unlock(); psp_render_gl_overlay(NULL, 0, 0); return; }
+    if (!showing && !text && !nchat) { toast_unlock(); psp_render_gl_overlay(NULL, 0, 0); return; }
 
     HDC dc = CreateCompatibleDC(NULL);
     HFONT old = (HFONT)SelectObject(dc, GetStockObject(ANSI_FIXED_FONT));
@@ -842,8 +906,13 @@ static void compose_overlay(void) {
     const int fw = text ? sz.cx + 8 : 0, fh = text ? sz.cy + 4 : 0;
     RECT cr = { 0, 0, 0, 0 };
     GetClientRect(g_main, &cr);
-    const int w = showing ? (cr.right > fw ? cr.right : fw) : fw;
-    const int h = showing ? (fh > TOAST_H + 24 ? fh : TOAST_H + 24) : fh;
+    int w = showing ? (cr.right > fw ? cr.right : fw) : fw;
+    int h = showing ? (fh > TOAST_H + 24 ? fh : TOAST_H + 24) : fh;
+    const int chx = 6, chy = fh + 6;                    /* the chat, under the FPS line */
+    if (nchat) {
+        if (w < chx + CHAT_W) w = chx + CHAT_W;
+        if (h < chy + nchat * CHAT_LINE_H) h = chy + nchat * CHAT_LINE_H;
+    }
     const int cx = w - TOAST_W - 20 + (int)((1 - in) * (TOAST_W + 30)), cy = 20;
     BITMAPINFO bi;
     memset(&bi, 0, sizeof bi);
@@ -864,6 +933,7 @@ static void compose_overlay(void) {
             TextOutA(dc, 4, 2, text, (int)strlen(text));
         }
         if (showing) draw_card(dc, cx, cy, &g_toasts[0]);
+        if (nchat) draw_chat(dc, chx, chy, chat, nchat);
         GdiFlush();
         uint32_t *px = (uint32_t *)bits;
         for (int y = 0; y < h; y++)
@@ -872,6 +942,7 @@ static void compose_overlay(void) {
                 uint32_t a = 0;
                 if (x < fw && y < fh) a = c ? 0xFF : 0xC0;                    /* the FPS box */
                 if (showing && x >= cx && x < cx + TOAST_W && y >= cy && y < cy + TOAST_H) a = 0xF2;
+                if (nchat && x >= chx && x < chx + CHAT_W && y >= chy && y < chy + nchat * CHAT_LINE_H) a = 0xD8;
                 px[y * w + x] = (c & 0xFF) << 16 | (c & 0xFF00) | (c >> 16 & 0xFF) | a << 24;
             }
         psp_render_gl_overlay(px, w, h);
@@ -903,6 +974,18 @@ void mhfu_window_notify(const char *head, const char *title, const char *text, c
             g_badge_loaded = 0;          /* compose_overlay decodes it, on the window's thread */
         }
     }
+    toast_unlock();
+    if (g_main) PostMessageA(g_main, WM_TOAST, 0, 0);
+}
+
+void mhfu_window_chat(const char *nick, const char *text, int self) {
+    toast_lock();
+    if (g_nchat == CHAT_LINES) memmove(g_chat, g_chat + 1, sizeof g_chat[0] * (--g_nchat));
+    chat_line *l = &g_chat[g_nchat++];
+    snprintf(l->nick, sizeof l->nick, "%s", nick ? nick : "");
+    snprintf(l->text, sizeof l->text, "%s", text ? text : "");
+    l->self = self;
+    l->t = GetTickCount64();
     toast_unlock();
     if (g_main) PostMessageA(g_main, WM_TOAST, 0, 0);
 }
@@ -947,5 +1030,6 @@ int mhfu_window_text_result(uint16_t *out, int cap) { (void)out; (void)cap; retu
 void mhfu_window_notify(const char *head, const char *title, const char *text, const char *badge_png) {
     (void)head; (void)title; (void)text; (void)badge_png;
 }
+void mhfu_window_chat(const char *nick, const char *text, int self) { (void)nick; (void)text; (void)self; }
 
 #endif

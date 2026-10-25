@@ -48,4 +48,8 @@ int mhfu_window_text_result(uint16_t *out, int cap);
  * none). Any thread; they queue and show one at a time. */
 void mhfu_window_notify(const char *head, const char *title, const char *text, const char *badge_png);
 
+/* A line of the room's chat (chat.c), shown over the game's top-left for a
+ * while: `self` 1 for this player's own, 2 for a notice (no name). Any thread. */
+void mhfu_window_chat(const char *nick, const char *text, int self);
+
 #endif
