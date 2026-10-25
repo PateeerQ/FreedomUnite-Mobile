@@ -13,8 +13,8 @@ multiplayer through a private server.
 Desktop bring-up on Windows (PC first, Android after). The game boots, plays
 its movies, creates and saves a character, loads the save and runs the village
 (Pokke), the house and the Training School in 3D at its own 30 fps, with
-sound, music, keyboard and DualSense/Xbox controllers. Quests are not tested
-yet.
+sound, music, keyboard and DualSense/Xbox controllers. A village quest has been
+played from start to finish without a crash.
 
 ### Progress
 
@@ -25,7 +25,7 @@ switched in when the game loads it; "tested" means someone has played through it
 |---|---|---|
 | CPU recompilation (Allegrex + VFPU) | ![85%](https://img.shields.io/badge/85%25-brightgreen?style=flat-square) | EBOOT and every overlay recompile; VFPU ops checked against PPSSPP as they turn up |
 | Game overlays, recompiled | ![100%](https://img.shields.io/badge/100%25-brightgreen?style=flat-square) | 298 of 298, extracted from DATA.BIN (`tools/re/databin.py`) |
-| Game overlays, tested in game | ![5%](https://img.shields.io/badge/5%25-orange?style=flat-square) | title, menus, character creation, village, house, Training School |
+| Game overlays, tested in game | ![10%](https://img.shields.io/badge/10%25-orange?style=flat-square) | title, menus, character creation, village, house, Training School, game_task and a quest region |
 | System modules (firmware HLE) | ![70%](https://img.shields.io/badge/70%25-yellow?style=flat-square) | threads, I/O, UMD/ISO, display, ctrl, utility dialogs, savedata, libfont, sceMpeg, sceAtrac, sceNetAdhoc; missing: encrypted saves, the sound PRX |
 | Graphics (GE + GL renderer) | ![70%](https://img.shields.io/badge/70%25-yellow?style=flat-square) | textures, lighting, fog, skinning, clipping, render-to-texture; missing: stencil, colour test, logic op, mipmaps, culling, DXT, specular, points/lines |
 | Audio | ![80%](https://img.shields.io/badge/80%25-brightgreen?style=flat-square) | sound effects, music (ATRAC3/3+ via FFmpeg), movie sound; small gaps while loading |
@@ -33,7 +33,7 @@ switched in when the game loads it; "tested" means someone has played through it
 | Input | ![90%](https://img.shields.io/badge/90%25-brightgreen?style=flat-square) | keyboard, controllers (right stick = camera), text box for the game's keyboard |
 | Save data | ![80%](https://img.shields.io/badge/80%25-brightgreen?style=flat-square) | save and load work (unencrypted) |
 | Multiplayer (ad hoc over rooms) | ![40%](https://img.shields.io/badge/40%25-yellow?style=flat-square) | rooms with list + passcode work and are tested without the game; not yet in game |
-| Gameplay coverage | ![20%](https://img.shields.io/badge/20%25-orange?style=flat-square) | village life works; quests, hunts, the Gathering Hall untested |
+| Gameplay coverage | ![40%](https://img.shields.io/badge/40%25-yellow?style=flat-square) | village life and a full quest (out, region changes, back) work; the Gathering Hall, more maps and monsters untested |
 | PC release (launcher) | ![0%](https://img.shields.io/badge/0%25-lightgrey?style=flat-square) | after the game works end to end |
 | Android port | ![0%](https://img.shields.io/badge/0%25-lightgrey?style=flat-square) | NDK + SDL3, touch buttons, GLES renderer |
 
