@@ -137,29 +137,39 @@ static void grab(void) {
     }
 }
 
-/* ---- the Multiplayer menu ---- */
+/* ---- the Multiplayer menu ----
+ *
+ * As in Monster Hunter's online lobbies: Create Server asks for an optional
+ * 4-digit passcode; Join Server lists the open rooms (this network and the
+ * relay), each with its host, player count and a lock if it has a passcode,
+ * and the passcode is asked for there. A code typed in joins directly. */
 
-enum { ID_CREATE = 100, ID_JOIN, ID_LEAVE, ID_CODE_EDIT, ID_CODE_OK, ID_CODE_CANCEL };
+enum {
+    ID_CREATE = 100, ID_JOIN, ID_LEAVE,
+    ID_DLG_OK, ID_DLG_CANCEL, ID_PASS_EDIT, ID_CODE_EDIT, ID_ROOM_LIST, ID_REFRESH,
+};
 #define WM_LOBBY_DONE (WM_APP + 1)
+#define WM_ROOMS_DONE (WM_APP + 2)
 
 static volatile LONG g_lobby_busy;
 static char          g_lobby_err[256];
 static char          g_join_code[16];
+static char          g_pass[8];
 
 /* Create and join can take a few seconds (finding the room on the LAN), so
  * they run on a thread of their own and post back when done. */
 static DWORD WINAPI lobby_worker(LPVOID arg) {
     int create = (int)(INT_PTR)arg;
     g_lobby_err[0] = 0;
-    int r = create ? mhfu_lobby_create(g_lobby_err, sizeof g_lobby_err)
-                   : mhfu_lobby_join(g_join_code, g_lobby_err, sizeof g_lobby_err);
+    int r = create ? mhfu_lobby_create(g_pass, g_lobby_err, sizeof g_lobby_err)
+                   : mhfu_lobby_join(g_join_code, g_pass, g_lobby_err, sizeof g_lobby_err);
     PostMessageA(g_main, WM_LOBBY_DONE, (WPARAM)r, (LPARAM)create);
     return 0;
 }
 
 static void lobby_start(int create) {
     if (InterlockedExchange(&g_lobby_busy, 1)) return;
-    SetWindowTextA(g_main, create ? "MHFU - creating a room..." : "MHFU - looking for the room...");
+    SetWindowTextA(g_main, create ? "MHFU - creating a room..." : "MHFU - joining the room...");
     HANDLE t = CreateThread(NULL, 0, lobby_worker, (LPVOID)(INT_PTR)create, 0, NULL);
     if (t) CloseHandle(t);
     else InterlockedExchange(&g_lobby_busy, 0);
@@ -172,33 +182,40 @@ static void update_title(void) {
     SetWindowTextA(g_main, title);
 }
 
-/* The room code prompt: a small window with an edit box. */
-static LRESULT CALLBACK code_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+/* A control on a dialog, in the GUI font. */
+static HWND control(HWND parent, const char *cls, const char *text, DWORD style, int x, int y, int w, int h,
+                    int id, DWORD ex) {
+    HWND c = CreateWindowExA(ex, cls, text, WS_CHILD | WS_VISIBLE | style, x, y, w, h, parent,
+                             (HMENU)(INT_PTR)id, NULL, NULL);
+    SendMessageA(c, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+    return c;
+}
+
+static int read_pass(HWND d) {
+    GetDlgItemTextA(d, ID_PASS_EDIT, g_pass, sizeof g_pass);
+    if (mhfu_lobby_check_passcode(g_pass) == 0) return 0;
+    MessageBoxA(d, "A passcode is 4 digits (or empty for a public room).", "Multiplayer", MB_OK | MB_ICONWARNING);
+    return -1;
+}
+
+/* Create Server: the passcode, if any. */
+static LRESULT CALLBACK create_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE: {
-        HFONT font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-        HWND l = CreateWindowA("STATIC", "Room code (e.g. MH-4K7Q):", WS_CHILD | WS_VISIBLE,
-                               12, 12, 260, 18, h, NULL, NULL, NULL);
-        HWND e = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_UPPERCASE,
-                                 12, 34, 260, 24, h, (HMENU)ID_CODE_EDIT, NULL, NULL);
-        HWND ok = CreateWindowA("BUTTON", "Join", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-                                110, 68, 78, 26, h, (HMENU)ID_CODE_OK, NULL, NULL);
-        HWND cancel = CreateWindowA("BUTTON", "Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                    194, 68, 78, 26, h, (HMENU)ID_CODE_CANCEL, NULL, NULL);
-        SendMessageA(l, WM_SETFONT, (WPARAM)font, TRUE);
-        SendMessageA(e, WM_SETFONT, (WPARAM)font, TRUE);
-        SendMessageA(ok, WM_SETFONT, (WPARAM)font, TRUE);
-        SendMessageA(cancel, WM_SETFONT, (WPARAM)font, TRUE);
-        SendMessageA(e, EM_SETLIMITTEXT, 9, 0);
+        control(h, "STATIC", "Passcode (4 digits), or empty for a public room:", 0, 12, 12, 300, 18, 0, 0);
+        HWND e = control(h, "EDIT", "", WS_TABSTOP | ES_NUMBER, 12, 34, 120, 24, ID_PASS_EDIT, WS_EX_CLIENTEDGE);
+        SendMessageA(e, EM_SETLIMITTEXT, 4, 0);
+        control(h, "BUTTON", "Create", WS_TABSTOP | BS_DEFPUSHBUTTON, 150, 70, 78, 26, ID_DLG_OK, 0);
+        control(h, "BUTTON", "Cancel", WS_TABSTOP, 234, 70, 78, 26, ID_DLG_CANCEL, 0);
         SetFocus(e);
         return 0;
     }
     case WM_COMMAND:
-        if (LOWORD(wp) == ID_CODE_OK || LOWORD(wp) == IDOK) {
-            GetDlgItemTextA(h, ID_CODE_EDIT, g_join_code, sizeof g_join_code);
+        if (LOWORD(wp) == ID_DLG_OK || LOWORD(wp) == IDOK) {
+            if (read_pass(h) != 0) return 0;
             DestroyWindow(h);
-            lobby_start(0);
-        } else if (LOWORD(wp) == ID_CODE_CANCEL || LOWORD(wp) == IDCANCEL) {
+            lobby_start(1);
+        } else if (LOWORD(wp) == ID_DLG_CANCEL || LOWORD(wp) == IDCANCEL) {
             DestroyWindow(h);
         }
         return 0;
@@ -210,26 +227,133 @@ static LRESULT CALLBACK code_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcA(h, msg, wp, lp);
 }
 
-static void ask_code(void) {
-    static int registered;
-    if (!registered) {
-        WNDCLASSA wc;
+/* Join Server: the list of rooms, filled by a thread (the LAN takes about a
+ * second to answer), then a code and a passcode. */
+static mhfu_room g_rooms[32];
+static int       g_nrooms;
+
+static DWORD WINAPI list_worker(LPVOID arg) {
+    HWND d = (HWND)arg;
+    static mhfu_room found[32];
+    const int n = mhfu_lobby_list(found, 32);
+    PostMessageA(d, WM_ROOMS_DONE, (WPARAM)n, (LPARAM)found);
+    return 0;
+}
+
+static void refresh_rooms(HWND d) {
+    HWND list = GetDlgItem(d, ID_ROOM_LIST);
+    SendMessageA(list, LB_RESETCONTENT, 0, 0);
+    SendMessageA(list, LB_ADDSTRING, 0, (LPARAM)"Looking for rooms...");
+    EnableWindow(GetDlgItem(d, ID_REFRESH), FALSE);
+    HANDLE t = CreateThread(NULL, 0, list_worker, d, 0, NULL);
+    if (t) CloseHandle(t);
+}
+
+static void show_rooms(HWND d, const mhfu_room *found, int n) {
+    HWND list = GetDlgItem(d, ID_ROOM_LIST);
+    SendMessageA(list, LB_RESETCONTENT, 0, 0);
+    g_nrooms = n < 32 ? n : 32;
+    memcpy(g_rooms, found, (size_t)g_nrooms * sizeof *g_rooms);
+    for (int i = 0; i < g_nrooms; i++) {
+        char line[128];
+        snprintf(line, sizeof line, "%-24s %d/4   %s%s", g_rooms[i].name, g_rooms[i].players,
+                 g_rooms[i].locked ? "[passcode]  " : "", g_rooms[i].internet ? "(internet)" : "(LAN)");
+        SendMessageA(list, LB_ADDSTRING, 0, (LPARAM)line);
+    }
+    if (!g_nrooms) SendMessageA(list, LB_ADDSTRING, 0, (LPARAM)"No rooms found. Refresh, or type a code below.");
+    EnableWindow(GetDlgItem(d, ID_REFRESH), TRUE);
+}
+
+static LRESULT CALLBACK join_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_CREATE: {
+        control(h, "STATIC", "Rooms:", 0, 12, 10, 200, 18, 0, 0);
+        HWND list = control(h, "LISTBOX", "", WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
+                            12, 30, 396, 150, ID_ROOM_LIST, WS_EX_CLIENTEDGE);
+        SendMessageA(list, WM_SETFONT, (WPARAM)GetStockObject(ANSI_FIXED_FONT), TRUE);
+        control(h, "BUTTON", "Refresh", WS_TABSTOP, 330, 186, 78, 26, ID_REFRESH, 0);
+        control(h, "STATIC", "Room code:", 0, 12, 192, 70, 18, 0, 0);
+        HWND code = control(h, "EDIT", "", WS_TABSTOP | ES_UPPERCASE, 86, 188, 110, 24, ID_CODE_EDIT, WS_EX_CLIENTEDGE);
+        SendMessageA(code, EM_SETLIMITTEXT, 9, 0);
+        control(h, "STATIC", "Passcode:", 0, 12, 224, 70, 18, 0, 0);
+        HWND pass = control(h, "EDIT", "", WS_TABSTOP | ES_NUMBER, 86, 220, 110, 24, ID_PASS_EDIT, WS_EX_CLIENTEDGE);
+        SendMessageA(pass, EM_SETLIMITTEXT, 4, 0);
+        control(h, "BUTTON", "Join", WS_TABSTOP | BS_DEFPUSHBUTTON, 246, 254, 78, 26, ID_DLG_OK, 0);
+        control(h, "BUTTON", "Cancel", WS_TABSTOP, 330, 254, 78, 26, ID_DLG_CANCEL, 0);
+        g_nrooms = 0;
+        refresh_rooms(h);
+        return 0;
+    }
+    case WM_ROOMS_DONE:
+        show_rooms(h, (const mhfu_room *)lp, (int)wp);
+        return 0;
+    case WM_COMMAND:
+        switch (LOWORD(wp)) {
+        case ID_ROOM_LIST:
+            if (HIWORD(wp) == LBN_SELCHANGE || HIWORD(wp) == LBN_DBLCLK) {
+                const int i = (int)SendMessageA(GetDlgItem(h, ID_ROOM_LIST), LB_GETCURSEL, 0, 0);
+                if (i < 0 || i >= g_nrooms) return 0;
+                SetDlgItemTextA(h, ID_CODE_EDIT, g_rooms[i].code);
+                SetFocus(GetDlgItem(h, g_rooms[i].locked ? ID_PASS_EDIT : ID_DLG_OK));
+                if (HIWORD(wp) == LBN_DBLCLK && !g_rooms[i].locked) PostMessageA(h, WM_COMMAND, ID_DLG_OK, 0);
+            }
+            return 0;
+        case ID_REFRESH:
+            refresh_rooms(h);
+            return 0;
+        case ID_DLG_OK: case IDOK: {
+            GetDlgItemTextA(h, ID_CODE_EDIT, g_join_code, sizeof g_join_code);
+            if (!g_join_code[0]) {
+                MessageBoxA(h, "Pick a room, or type its code.", "Multiplayer", MB_OK | MB_ICONINFORMATION);
+                return 0;
+            }
+            if (read_pass(h) != 0) return 0;
+            for (int i = 0; i < g_nrooms; i++)
+                if (g_rooms[i].locked && !g_pass[0] && !_stricmp(g_rooms[i].code, g_join_code)) {
+                    MessageBoxA(h, "This room has a passcode.", "Multiplayer", MB_OK | MB_ICONINFORMATION);
+                    SetFocus(GetDlgItem(h, ID_PASS_EDIT));
+                    return 0;
+                }
+            DestroyWindow(h);
+            lobby_start(0);
+            return 0;
+        }
+        case ID_DLG_CANCEL: case IDCANCEL:
+            DestroyWindow(h);
+            return 0;
+        }
+        return 0;
+    case WM_DESTROY:
+        EnableWindow(g_main, TRUE);
+        SetForegroundWindow(g_main);
+        return 0;
+    }
+    return DefWindowProcA(h, msg, wp, lp);
+}
+
+/* A small modal window of class `cls`, made the first time it is asked for. */
+static void open_dialog(const char *cls, WNDPROC proc, const char *title, int w, int hgt) {
+    WNDCLASSA wc;
+    if (!GetClassInfoA(GetModuleHandleA(NULL), cls, &wc)) {
         memset(&wc, 0, sizeof wc);
-        wc.lpfnWndProc = code_proc;
+        wc.lpfnWndProc = proc;
         wc.hInstance = GetModuleHandleA(NULL);
         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
         wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-        wc.lpszClassName = "mhfu_code";
+        wc.lpszClassName = cls;
         RegisterClassA(&wc);
-        registered = 1;
     }
-    RECT r;
+    RECT r, a = { 0, 0, w, hgt };
     GetWindowRect(g_main, &r);
-    HWND d = CreateWindowExA(WS_EX_DLGMODALFRAME, "mhfu_code", "Join Server",
-                             WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
-                             r.left + 60, r.top + 80, 300, 140, g_main, NULL, GetModuleHandleA(NULL), NULL);
+    const DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE;
+    AdjustWindowRectEx(&a, style, FALSE, WS_EX_DLGMODALFRAME);
+    HWND d = CreateWindowExA(WS_EX_DLGMODALFRAME, cls, title, style, r.left + 60, r.top + 60,
+                             a.right - a.left, a.bottom - a.top, g_main, NULL, GetModuleHandleA(NULL), NULL);
     if (d) EnableWindow(g_main, FALSE);
 }
+
+static void ask_create(void) { open_dialog("mhfu_create", create_proc, "Create Server", 324, 108); }
+static void ask_join(void)   { open_dialog("mhfu_join", join_proc, "Join Server", 420, 292); }
 
 static HMENU make_menu(void) {
     HMENU bar = CreateMenu(), mp = CreatePopupMenu();
@@ -245,8 +369,8 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_COMMAND:
         switch (LOWORD(wp)) {
-        case ID_CREATE: lobby_start(1); break;
-        case ID_JOIN:   if (!g_lobby_busy) ask_code(); break;
+        case ID_CREATE: if (!g_lobby_busy) ask_create(); break;
+        case ID_JOIN:   if (!g_lobby_busy) ask_join(); break;
         case ID_LEAVE:  mhfu_lobby_leave(); update_title(); break;
         }
         return 0;
@@ -258,8 +382,9 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             char code[8], text[200];
             mhfu_lobby_code(code);
             snprintf(text, sizeof text,
-                     "Room %s is open.\n\nOther players choose Join Server and enter %s.\n"
-                     "Then go to the Gathering Hall as usual.", code, code);
+                     "Room %s is open%s.\n\nOther players find it under Join Server%s, or type %s there.\n"
+                     "Then go to the Gathering Hall as usual.", code, g_pass[0] ? " with a passcode" : "",
+                     g_pass[0] ? " and enter the passcode" : "", code);
             MessageBoxA(h, text, "Multiplayer", MB_OK | MB_ICONINFORMATION);
         }
         return 0;
