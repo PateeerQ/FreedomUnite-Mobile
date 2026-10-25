@@ -1,8 +1,18 @@
-﻿diff --git a/src/hle/iofilemgr.c b/src/hle/iofilemgr.c
-index 0db8da7..0136bac 100644
+diff --git a/src/hle/iofilemgr.c b/src/hle/iofilemgr.c
+index 0db8da7..f94e3f8 100644
 --- a/src/hle/iofilemgr.c
 +++ b/src/hle/iofilemgr.c
-@@ -118,6 +118,51 @@ typedef struct {
+@@ -20,6 +20,9 @@
+ #  define _POSIX_C_SOURCE 200809L
+ #endif
+ 
++#if defined(__ANDROID__) && !defined(_BSD_SOURCE)
++#define _BSD_SOURCE     /* funopen (iso_open), in bionic's stdio.h */
++#endif
+ #include "psprecomp/hle.h"
+ 
+ #include <ctype.h>
+@@ -118,6 +121,51 @@ typedef struct {
  
  static iso_entry g_iso_root;
  
@@ -54,7 +64,7 @@ index 0db8da7..0136bac 100644
  static int iso_read(FILE *f, uint32_t lbn, uint8_t *buf) {
      if (io_seek(f, (int64_t)lbn * SECTOR, SEEK_SET) != 0) return -1;
      return fread(buf, 1, SECTOR, f) == SECTOR ? 0 : -1;
-@@ -137,7 +182,7 @@ static void iso_record(const uint8_t *r, iso_entry *e) {
+@@ -137,7 +185,7 @@ static void iso_record(const uint8_t *r, iso_entry *e) {
  int psp_io_set_disc_image(const char *path) {
      g_iso[0] = '\0';
      if (!path || !*path) return 0;
@@ -63,7 +73,7 @@ index 0db8da7..0136bac 100644
      uint8_t pvd[SECTOR];
      int ok = f && iso_read(f, 16, pvd) == 0 && pvd[0] == 1 && !memcmp(pvd + 1, "CD001", 5);
      if (ok) iso_record(pvd + 156, &g_iso_root);
-@@ -244,7 +289,7 @@ static int new_handle(void) {
+@@ -244,7 +292,7 @@ static int new_handle(void) {
  static uint32_t open_disc(const char *guest, uint32_t lbn, uint64_t size) {
      int i = new_handle();
      if (i < 0) return ERR_MFILE;
@@ -72,7 +82,7 @@ index 0db8da7..0136bac 100644
      if (!f) return ERR_NOENT;
      io_file *h = &g_file[i];
      memset(h, 0, sizeof *h);
-@@ -279,7 +324,7 @@ static void hle_Open(void) {
+@@ -279,7 +327,7 @@ static void hle_Open(void) {
      }
      if (is_disc && g_iso[0]) {
          iso_entry e;
@@ -81,7 +91,7 @@ index 0db8da7..0136bac 100644
          int found = f && iso_find(f, rest, &e) == 0 && !e.dir;
          if (f) fclose(f);
          if (!found) {
-@@ -486,7 +531,7 @@ static void hle_Getstat(void) {
+@@ -486,7 +534,7 @@ static void hle_Getstat(void) {
  
      if (is_disc && g_iso[0]) {
          iso_entry e;

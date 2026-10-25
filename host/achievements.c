@@ -1,4 +1,7 @@
 /* MHFU-Android -- see achievements.h. */
+#if defined(__ANDROID__) && !defined(_BSD_SOURCE)
+#define _BSD_SOURCE     /* funopen, in bionic's stdio.h */
+#endif
 #include "achievements.h"
 
 #if MHFU_RCHEEVOS
