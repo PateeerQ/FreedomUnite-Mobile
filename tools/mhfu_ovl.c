@@ -22,8 +22,8 @@
  * first word after a `jr $ra` or `j` and its delay slot, padding allowed, or
  * after two or more words of zero padding) appended past the overlay's end.
  *
- * The hash is FNV-1a over header + code + data, the same bytes and function
- * hle_mhfu.c uses to recognise the overlay when the game loads it.
+ * The hash is FNV-1a over header + code (not the data, which the game writes
+ * into), the same bytes and function hle_mhfu.c uses to recognise the overlay when the game loads it.
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -94,7 +94,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     g_n = end;
-    uint32_t hash = fnv1a(file, end);
+    uint32_t hash = fnv1a(file, HDR + code);
     char name[33] = {0};
     memcpy(name, file + 32, 32);
     for (int i = 0; i < 32 && name[i]; i++) if (name[i] < 33 || name[i] > 126) name[i] = '_';
