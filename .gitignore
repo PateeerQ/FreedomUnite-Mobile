@@ -34,6 +34,14 @@ deps/
 # Loose psprecomp download (the submodule at psprecomp/ replaces it)
 psprecomp-*/
 
+# Android: Gradle state, the NDK build, and the APK -- which holds code
+# recompiled from your own EBOOT, so it is never committed or shared
+.gradle/
+local.properties
+android/app/.cxx/
+*.apk
+*.aab
+
 # Editor / OS
 .vs/
 .vscode/
