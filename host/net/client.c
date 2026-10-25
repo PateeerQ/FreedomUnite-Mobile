@@ -304,20 +304,21 @@ static void reader(void *arg) {
 /* ---- the room ---- */
 
 int mhn_client_start(const char *host, uint16_t port, int create, const char *code,
-                     const uint8_t mac[6], const char *nick) {
+                     const uint8_t mac[6], const char *nick, const char *pass) {
     ensure_locks();
     mhn_client_stop();
     if (net_sys_init() != 0) return -1;
     net_sock s = net_tcp_connect(host, port, 4000);
     if (s == NET_BAD_SOCK) return -1;
 
-    uint8_t h[4 + 1 + MHN_CODE_LEN + 6 + MHN_NICK_LEN];
+    uint8_t h[4 + 1 + MHN_CODE_LEN + 6 + MHN_NICK_LEN + MHN_PASS_LEN];
     memset(h, 0, sizeof h);
     mhn_put32(h, MHN_MAGIC);
     h[4] = (uint8_t)(create ? 1 : 0);
     if (code) strncpy((char *)h + 5, code, MHN_CODE_LEN - 1);
     memcpy(h + 5 + MHN_CODE_LEN, mac, 6);
     if (nick) strncpy((char *)h + 5 + MHN_CODE_LEN + 6, nick, MHN_NICK_LEN - 1);
+    if (pass) strncpy((char *)h + 5 + MHN_CODE_LEN + 6 + MHN_NICK_LEN, pass, MHN_PASS_LEN - 1);
     g.s = s;
     memcpy(g.mac, mac, 6);
     if (send_frame(MHN_HELLO, h, sizeof h) != 0) { net_close(s); return -1; }
@@ -411,6 +412,87 @@ int mhn_lan_find(const char *code, char *host, int host_cap, uint16_t *port, int
     }
     net_close(u);
     return found;
+}
+
+/* ---- room lists ---- */
+
+static int add_entry(mhn_room_info *out, int n, int max, const uint8_t *e, const char *host, uint16_t port,
+                     int relay) {
+    char code[MHN_CODE_LEN];
+    memcpy(code, e, MHN_CODE_LEN);
+    code[MHN_CODE_LEN - 1] = 0;
+    for (int i = 0; i < n; i++) if (!strcmp(out[i].code, code)) return n;   /* heard twice */
+    if (n >= max) return n;
+    mhn_room_info *r = &out[n];
+    memset(r, 0, sizeof *r);
+    memcpy(r->code, code, MHN_CODE_LEN);
+    memcpy(r->name, e + MHN_CODE_LEN, MHN_NAME_LEN);
+    r->name[MHN_NAME_LEN - 1] = 0;
+    r->players = e[MHN_CODE_LEN + MHN_NAME_LEN];
+    r->locked = e[MHN_CODE_LEN + MHN_NAME_LEN + 1];
+    snprintf(r->host, sizeof r->host, "%s", host);
+    r->port = port;
+    r->relay = relay;
+    return n + 1;
+}
+
+int mhn_lan_list(mhn_room_info *out, int max, int timeout_ms) {
+    if (net_sys_init() != 0) return 0;
+    net_sock u = net_udp_bind(0);
+    if (u == NET_BAD_SOCK) return 0;
+    static const uint8_t q[4] = { 'M', 'H', 'N', 'L' };
+    uint64_t until = net_now_ms() + (uint64_t)timeout_ms, next_send = 0;
+    int n = 0;
+    while (net_now_ms() < until) {
+        if (net_now_ms() >= next_send) {
+            net_udp_broadcast(u, MHN_PORT, q, sizeof q);
+            net_udp_sendto(u, 0x7F000001u, MHN_PORT, q, sizeof q);   /* a hub on this machine */
+            next_send = net_now_ms() + 300;
+        }
+        uint8_t ready;
+        if (net_poll(&u, 1, &ready, 100) <= 0) continue;
+        uint8_t r[7 + 16 * MHN_ENTRY_LEN];
+        uint32_t ip;
+        const int got = net_udp_recvfrom(u, r, sizeof r, &ip, NULL);
+        if (got < 7 || memcmp(r, "MHNR", 4) != 0) continue;
+        char host[64];
+        net_ip_str(ip, host, sizeof host);
+        const uint16_t port = mhn_get16(r + 4);
+        for (int k = 0; k < r[6] && 7 + (k + 1) * MHN_ENTRY_LEN <= got; k++)
+            n = add_entry(out, n, max, r + 7 + k * MHN_ENTRY_LEN, host, port, 0);
+    }
+    net_close(u);
+    return n;
+}
+
+int mhn_hub_list(const char *host, uint16_t port, mhn_room_info *out, int max, int timeout_ms) {
+    if (net_sys_init() != 0) return -1;
+    net_sock s = net_tcp_connect(host, port, timeout_ms);
+    if (s == NET_BAD_SOCK) return -1;
+    const uint8_t ask[5] = { 1, 0, 0, 0, MHN_LIST };              /* length 1: just the type */
+    if (net_send_all(s, ask, sizeof ask) != 0) { net_close(s); return -1; }
+    static uint8_t b[5 + 4 + MHN_LIST_MAX * MHN_ENTRY_LEN];
+    uint32_t got = 0, want = 5;
+    const uint64_t until = net_now_ms() + (uint64_t)timeout_ms;
+    while (got < want && net_now_ms() < until) {
+        uint8_t ready;
+        if (net_poll(&s, 1, &ready, 100) <= 0) continue;
+        const int n = net_recv(s, b + got, want - got);
+        if (n <= 0) break;
+        got += (uint32_t)n;
+        if (got == 5 && want == 5) {
+            const uint32_t fl = mhn_get32(b);
+            if (b[4] != MHN_ROOM_LIST || fl < 5 || 4 + fl > sizeof b) break;
+            want = 4 + fl;
+        }
+    }
+    net_close(s);
+    if (got < want || want < 9) return -1;
+    const uint32_t count = mhn_get32(b + 5);
+    int n = 0;
+    for (uint32_t k = 0; k < count && 9 + (k + 1) * MHN_ENTRY_LEN <= got; k++)
+        n = add_entry(out, n, max, b + 9 + k * MHN_ENTRY_LEN, host, port, 1);
+    return n;
 }
 
 /* ---- adhocctl ---- */

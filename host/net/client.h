@@ -15,10 +15,12 @@
 /* ---- the room ---- */
 
 /* Connect to a hub and enter a room: `create` asks a public relay for a new
- * room, otherwise `code` names the room to join. Blocks up to a few seconds.
- * Returns MHN_OK or an MHN_* status, or -1 if the hub could not be reached. */
+ * room (with `pass` as its passcode), otherwise `code` names the room to join
+ * and `pass` must match its passcode ("" or NULL: none). Blocks up to a few
+ * seconds. Returns MHN_OK or an MHN_* status, or -1 if the hub could not be
+ * reached. */
 int  mhn_client_start(const char *host, uint16_t port, int create, const char *code,
-                      const uint8_t mac[6], const char *nick);
+                      const uint8_t mac[6], const char *nick, const char *pass);
 void mhn_client_stop(void);
 /* 1 while in a room. A lost connection drops back to 0. */
 int  mhn_client_online(void);
@@ -38,6 +40,23 @@ int  mhn_client_members(mhn_peer *out, int max);
 /* Ask the LAN who holds room `code`: broadcasts and waits up to `timeout_ms`
  * for a hub to answer. Writes its address; 0 if one did. */
 int  mhn_lan_find(const char *code, char *host, int host_cap, uint16_t *port, int timeout_ms);
+
+/* A room someone could join, as a list shows it. */
+typedef struct {
+    char code[MHN_CODE_LEN];
+    char name[MHN_NAME_LEN];
+    int  players;
+    int  locked;            /* joining needs the passcode */
+    char host[64];          /* the hub that holds it */
+    uint16_t port;
+    int  relay;             /* on a relay (internet), not the LAN */
+} mhn_room_info;
+
+/* The rooms hubs on this network hold, from a broadcast and whatever answers
+ * within `timeout_ms`. Returns how many were written. */
+int  mhn_lan_list(mhn_room_info *out, int max, int timeout_ms);
+/* The rooms on one hub (a relay): how many were written, -1 if unreachable. */
+int  mhn_hub_list(const char *host, uint16_t port, mhn_room_info *out, int max, int timeout_ms);
 
 /* ---- adhocctl ---- */
 
