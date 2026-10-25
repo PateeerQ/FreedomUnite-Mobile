@@ -93,6 +93,12 @@ int  mhn_pdp_recv(int id, uint8_t smac[6], uint16_t *sport, void *buf, int *len)
 /* Size of the next waiting datagram, 0 if none. */
 int  mhn_pdp_next_size(int id);
 uint16_t mhn_pdp_port(int id);
+/* Bytes a socket holds before its oldest datagrams are dropped (the PSP's
+ * PdpCreate bufsize); 0 is the default limit. */
+void mhn_pdp_set_limit(int id, int bytes);
+/* Totals since start: datagrams in, read, dropped, and the summed wait of the
+ * read ones; plus the longest wait since the last call. */
+void mhn_pdp_stats(uint64_t *in, uint64_t *read, uint64_t *dropped, uint64_t *wait_ms_total, uint64_t *wait_ms_max);
 void mhn_pdp_delete(int id);
 
 enum { MHN_PTP_CLOSED = 0, MHN_PTP_LISTEN = 1, MHN_PTP_SYN_SENT = 2, MHN_PTP_ESTABLISHED = 4 };

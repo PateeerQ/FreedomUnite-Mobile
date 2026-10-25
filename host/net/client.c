@@ -20,6 +20,7 @@
 
 typedef struct dgram {
     struct dgram *next;
+    uint64_t at_ms;              /* when it arrived, for mhn_pdp_stats */
     uint8_t mac[6];
     uint16_t port;
     int len;
@@ -37,6 +38,7 @@ typedef struct {
     /* PDP */
     dgram *head, *tail;
     int queued;
+    int limit;                   /* bytes held before the oldest are dropped (the PSP's bufsize) */
     /* PTP */
     int state, peer_closed, refused;
     uint8_t pmac[6];
@@ -70,6 +72,9 @@ static struct {
     sock sk[MHN_MAX_SOCKETS + 1];
     uint16_t next_port;
 } g;
+
+/* Datagrams in, read by the game, dropped; and how long the read ones waited. */
+static uint64_t g_pdp_in, g_pdp_read, g_pdp_dropped, g_pdp_wait_ms, g_pdp_wait_max;
 
 static void ensure_locks(void) {
     if (!g.lock) g.lock = net_mutex_new();
@@ -158,10 +163,25 @@ static void on_traffic(int type, const uint8_t *b, uint32_t len) {
         for (int i = 1; i <= MHN_MAX_SOCKETS; i++) {
             sock *s = &g.sk[i];
             if (s->kind != 1 || s->lport != dport) continue;
-            if (s->queued + dlen > PDP_QUEUE_MAX) return;          /* full: dropped, as UDP would */
+            /* Full: the PSP drops what its receive buffer cannot hold. The
+             * oldest go, so a game that reads one datagram a frame while its
+             * peer sends more sees the newest state, not a queue that grows
+             * (with no limit it did: other hunters moved later and later). */
+            const int limit = s->limit > 0 ? s->limit : PDP_QUEUE_MAX;
+            while (s->head && s->queued + dlen > limit) {
+                dgram *old = s->head;
+                s->head = old->next;
+                if (!s->head) s->tail = NULL;
+                s->queued -= old->len;
+                g_pdp_dropped++;
+                free(old);
+            }
+            if (dlen > limit) { g_pdp_dropped++; return; }
             dgram *d = (dgram *)malloc(sizeof *d + (size_t)dlen);
             if (!d) return;
             d->next = NULL;
+            d->at_ms = net_now_ms();
+            g_pdp_in++;
             memcpy(d->mac, src, 6);
             d->port = sport;
             d->len = dlen;
@@ -642,6 +662,10 @@ int mhn_pdp_recv(int id, uint8_t smac[6], uint16_t *sport, void *buf, int *len) 
             *len = d->len;
             if (smac) memcpy(smac, d->mac, 6);
             if (sport) *sport = d->port;
+            const uint64_t waited = net_now_ms() - d->at_ms;
+            g_pdp_read++;
+            g_pdp_wait_ms += waited;
+            if (waited > g_pdp_wait_max) g_pdp_wait_max = waited;
             s->head = d->next;
             if (!s->head) s->tail = NULL;
             s->queued -= d->len;
@@ -651,6 +675,23 @@ int mhn_pdp_recv(int id, uint8_t smac[6], uint16_t *sport, void *buf, int *len) 
     }
     net_unlock(g.lock);
     return r;
+}
+
+void mhn_pdp_set_limit(int id, int bytes) {
+    ensure_locks();
+    net_lock(g.lock);
+    sock *s = get(id, 1);
+    if (s) s->limit = bytes;
+    net_unlock(g.lock);
+}
+
+void mhn_pdp_stats(uint64_t *in, uint64_t *read, uint64_t *dropped, uint64_t *wait_ms_total, uint64_t *wait_ms_max) {
+    ensure_locks();
+    net_lock(g.lock);
+    *in = g_pdp_in; *read = g_pdp_read; *dropped = g_pdp_dropped;
+    *wait_ms_total = g_pdp_wait_ms; *wait_ms_max = g_pdp_wait_max;
+    g_pdp_wait_max = 0;
+    net_unlock(g.lock);
 }
 
 int mhn_pdp_next_size(int id) {
