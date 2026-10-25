@@ -524,9 +524,43 @@ static void hle_VolatileMemUnlock(void) {
     psp_ret(0);
 }
 
+/* The SysClock conversions (PPSSPP's sceKernelTime). A SysClock is a 64-bit
+ * count of microseconds. MHFU's quest code calls SysClock2USWide a few times a
+ * second; unimplemented, its seconds and microseconds were whatever was in
+ * memory, and the two players' time-outs dropped each other from the group. */
+/* (u32 clock_lo, u32 clock_hi, u32 *sec, u32 *usec) */
+static void hle_SysClock2USWide(void) {
+    const uint64_t clock = (uint64_t)psp_arg(0) | (uint64_t)psp_arg(1) << 32;
+    if (psp_arg(2)) psp_write32(psp_arg(2), (uint32_t)(clock / 1000000u));
+    if (psp_arg(3)) psp_write32(psp_arg(3), (uint32_t)(clock % 1000000u));
+    psp_ret(0);
+}
+/* (SceKernelSysClock *clock, u32 *sec, u32 *usec) */
+static void hle_SysClock2US(void) {
+    const uint32_t at = psp_arg(0);
+    const uint64_t clock = at ? (uint64_t)psp_read32(at) | (uint64_t)psp_read32(at + 4) << 32 : 0;
+    if (psp_arg(1)) psp_write32(psp_arg(1), (uint32_t)(clock / 1000000u));
+    if (psp_arg(2)) psp_write32(psp_arg(2), (uint32_t)(clock % 1000000u));
+    psp_ret(0);
+}
+/* (u32 usec, SceKernelSysClock *clock) */
+static void hle_USec2SysClock(void) {
+    if (psp_arg(1)) { psp_write32(psp_arg(1), psp_arg(0)); psp_write32(psp_arg(1) + 4, 0); }
+    psp_ret(0);
+}
+/* (u32 usec) -> the clock as a 64-bit result */
+static void hle_USec2SysClockWide(void) {
+    psp_ret(psp_arg(0));
+    psp_cpu.r[PSP_REG_V1] = 0;
+}
+
 void mhfu_hle_register(const char *overlay_dir) {
     snprintf(g_ovl_dir, sizeof g_ovl_dir, "%s", overlay_dir ? overlay_dir : "");
     g_volatile_locked = 0;
+    psp_hle_register(0xE1619D7C, "ThreadManForUser", "sceKernelSysClock2USWide",  hle_SysClock2USWide);
+    psp_hle_register(0xBA6B92E2, "ThreadManForUser", "sceKernelSysClock2US",      hle_SysClock2US);
+    psp_hle_register(0x110DEC9A, "ThreadManForUser", "sceKernelUSec2SysClock",     hle_USec2SysClock);
+    psp_hle_register(0xC8CD158C, "ThreadManForUser", "sceKernelUSec2SysClockWide", hle_USec2SysClockWide);
     psp_hle_register(0x3E0271D3, "sceSuspendForUser", "sceKernelVolatileMemLock",    volatile_lock);
     psp_hle_register(0xA14F40B2, "sceSuspendForUser", "sceKernelVolatileMemTryLock", volatile_lock);
     psp_hle_register(0xA569E425, "sceSuspendForUser", "sceKernelVolatileMemUnlock",  hle_VolatileMemUnlock);
