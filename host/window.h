@@ -24,4 +24,13 @@ void mhfu_window_on_close(void (*fn)(void));
  * centre with no window. */
 uint32_t mhfu_window_buttons(uint8_t *ax, uint8_t *ay);
 
+/* The game's on-screen keyboard: a text box over the window, with `prompt`
+ * above it, `initial` in it (UTF-16, NUL-terminated) and at most `limit`
+ * characters. It does not block: 0 once the box is up, -1 with no window. */
+int mhfu_window_ask_text(const char *prompt, const uint16_t *initial, int limit);
+
+/* The box's answer: -1 while it is open, -2 if it was cancelled, otherwise
+ * the number of characters written to `out` (NUL-terminated, `cap` with it). */
+int mhfu_window_text_result(uint16_t *out, int cap);
+
 #endif

@@ -146,7 +146,7 @@ static void grab(void) {
 
 enum {
     ID_CREATE = 100, ID_JOIN, ID_LEAVE,
-    ID_DLG_OK, ID_DLG_CANCEL, ID_PASS_EDIT, ID_CODE_EDIT, ID_ROOM_LIST, ID_REFRESH,
+    ID_DLG_OK, ID_DLG_CANCEL, ID_PASS_EDIT, ID_CODE_EDIT, ID_ROOM_LIST, ID_REFRESH, ID_TEXT_EDIT,
 };
 #define WM_LOBBY_DONE (WM_APP + 1)
 #define WM_ROOMS_DONE (WM_APP + 2)
@@ -332,7 +332,7 @@ static LRESULT CALLBACK join_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 /* A small modal window of class `cls`, made the first time it is asked for. */
-static void open_dialog(const char *cls, WNDPROC proc, const char *title, int w, int hgt) {
+static HWND open_dialog(const char *cls, WNDPROC proc, const char *title, int w, int hgt) {
     WNDCLASSA wc;
     if (!GetClassInfoA(GetModuleHandleA(NULL), cls, &wc)) {
         memset(&wc, 0, sizeof wc);
@@ -350,6 +350,76 @@ static void open_dialog(const char *cls, WNDPROC proc, const char *title, int w,
     HWND d = CreateWindowExA(WS_EX_DLGMODALFRAME, cls, title, style, r.left + 60, r.top + 60,
                              a.right - a.left, a.bottom - a.top, g_main, NULL, GetModuleHandleA(NULL), NULL);
     if (d) EnableWindow(g_main, FALSE);
+    return d;
+}
+
+/* ---- the game's on-screen keyboard ----
+ *
+ * The game thread asks (mhfu_window_ask_text) and polls for the answer; the
+ * box itself is made here, on the window's thread. */
+
+#define WM_ASK_TEXT (WM_APP + 3)
+#define TEXT_MAX    128
+
+static char             g_text_prompt[128];
+static WCHAR            g_text[TEXT_MAX + 1];
+static int              g_text_limit;
+static volatile LONG    g_text_state;     /* 0 none, 1 open, 2 done, 3 cancelled */
+
+static void text_finish(HWND h, int ok) {
+    if (ok) GetDlgItemTextW(h, ID_TEXT_EDIT, g_text, TEXT_MAX + 1);
+    InterlockedExchange(&g_text_state, ok ? 2 : 3);
+    DestroyWindow(h);
+}
+
+static LRESULT CALLBACK text_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_CREATE: {
+        control(h, "STATIC", g_text_prompt, 0, 12, 12, 300, 18, 0, 0);
+        HWND e = control(h, "EDIT", "", WS_TABSTOP | ES_AUTOHSCROLL, 12, 34, 300, 24, ID_TEXT_EDIT, WS_EX_CLIENTEDGE);
+        SetWindowTextW(e, g_text);
+        SendMessageA(e, EM_SETLIMITTEXT, (WPARAM)g_text_limit, 0);
+        SendMessageA(e, EM_SETSEL, 0, -1);
+        control(h, "BUTTON", "OK", WS_TABSTOP | BS_DEFPUSHBUTTON, 150, 70, 78, 26, ID_DLG_OK, 0);
+        control(h, "BUTTON", "Cancel", WS_TABSTOP, 234, 70, 78, 26, ID_DLG_CANCEL, 0);
+        SetFocus(e);
+        return 0;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wp) == ID_DLG_OK || LOWORD(wp) == IDOK) text_finish(h, 1);
+        else if (LOWORD(wp) == ID_DLG_CANCEL || LOWORD(wp) == IDCANCEL) text_finish(h, 0);
+        return 0;
+    case WM_CLOSE:
+        text_finish(h, 0);
+        return 0;
+    case WM_DESTROY:
+        EnableWindow(g_main, TRUE);
+        SetForegroundWindow(g_main);
+        return 0;
+    }
+    return DefWindowProcA(h, msg, wp, lp);
+}
+
+int mhfu_window_ask_text(const char *prompt, const uint16_t *initial, int limit) {
+    if (!g_main || g_closed || g_text_state == 1) return -1;
+    snprintf(g_text_prompt, sizeof g_text_prompt, "%s", prompt && *prompt ? prompt : "Enter text:");
+    int n = 0;
+    if (initial) for (; initial[n] && n < TEXT_MAX; n++) g_text[n] = initial[n];
+    g_text[n] = 0;
+    g_text_limit = limit > 0 && limit < TEXT_MAX ? limit : TEXT_MAX;
+    InterlockedExchange(&g_text_state, 1);
+    if (!PostMessageA(g_main, WM_ASK_TEXT, 0, 0)) { InterlockedExchange(&g_text_state, 0); return -1; }
+    return 0;
+}
+
+int mhfu_window_text_result(uint16_t *out, int cap) {
+    const LONG s = g_text_state;
+    if (s == 1) return g_closed ? -2 : -1;
+    if (s != 2) return -2;
+    int n = 0;
+    for (; g_text[n] && n + 1 < cap; n++) out[n] = g_text[n];
+    if (cap > 0) out[n] = 0;
+    return n;
 }
 
 static void ask_create(void) { open_dialog("mhfu_create", create_proc, "Create Server", 324, 108); }
@@ -373,6 +443,10 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_JOIN:   if (!g_lobby_busy) ask_join(); break;
         case ID_LEAVE:  mhfu_lobby_leave(); update_title(); break;
         }
+        return 0;
+    case WM_ASK_TEXT:
+        if (!open_dialog("mhfu_text", text_proc, "Keyboard", 324, 108))
+            InterlockedExchange(&g_text_state, 3);   /* the box did not open */
         return 0;
     case WM_LOBBY_DONE: {
         InterlockedExchange(&g_lobby_busy, 0);
@@ -639,5 +713,10 @@ int mhfu_window_gl(void) { return -1; }
 int mhfu_window_closed(void) { return 0; }
 void mhfu_window_on_close(void (*fn)(void)) { (void)fn; }
 uint32_t mhfu_window_buttons(uint8_t *ax, uint8_t *ay) { (void)ax; (void)ay; return 0; }
+int mhfu_window_ask_text(const char *prompt, const uint16_t *initial, int limit) {
+    (void)prompt; (void)initial; (void)limit;
+    return -1;
+}
+int mhfu_window_text_result(uint16_t *out, int cap) { (void)out; (void)cap; return -2; }
 
 #endif
