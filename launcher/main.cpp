@@ -1097,8 +1097,20 @@ static void page_log(float w, float) {
     if (ImGui::Button("Clear")) g_log.clear();
     ImGui::SameLine();
     if (ImGui::Button("Open the logs folder")) open_in_shell((fs::u8path(paths::work()) / "logs").u8string());
+    // The last crash's log, for a report: copied whole (Discord and GitHub take a long paste as a file).
+    static std::string crash_note;
+    if (file_exists(crash_log_path())) {
+        ImGui::SameLine();
+        if (ImGui::Button("Copy crash report")) {
+            ImGui::SetClipboardText(crash_log_text().c_str());
+            crash_note = "Crash report copied: paste it into your bug report.";
+        }
+    }
     ImGui::SameLine();
     ImGui::Checkbox("Follow", &g_autoscroll);
+    if (!crash_note.empty()) ImGui::TextColored(C_OK, "%s", crash_note.c_str());
+    else if (game_exit_code() > 0 && file_exists(crash_log_path()))
+        ImGui::TextColored(C_WARN, "The game closed because of an error. \"Copy crash report\" puts its log on the clipboard.");
     ImGui::Spacing();
 
     const ImVec2 p = ImGui::GetCursorScreenPos(), avail = ImGui::GetContentRegionAvail();
