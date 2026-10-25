@@ -8,7 +8,8 @@
  * The host joins ad hoc group "MHFUTEST", listens for PTP on port 200 and
  * echoes PDP on port 100. The guest scans, joins the group, sends a broadcast
  * and a unicast datagram, opens a PTP connection and checks the echo. Both
- * print PASS or FAIL. */
+ * print PASS or FAIL. With --pass 1234 the room has that passcode: the guest
+ * checks the list shows it locked and that a wrong passcode is refused. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +19,7 @@
 #include "net/sys.h"
 
 static const char TEST_GROUP[MHN_GROUP_LEN] = "MHFUTEST";
+static const char *g_pass = "";      /* --pass 1234: the room's passcode */
 
 static int wait_event(int want, int ms) {
     uint64_t until = net_now_ms() + (uint64_t)ms;
@@ -36,11 +38,13 @@ static int host(const char *relay) {
     mhn_hub *hub = NULL;
     uint8_t mac[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
     if (relay) {
-        CHECK(mhn_client_start(relay, MHN_PORT, 1, NULL, mac, "Host") == MHN_OK, "room created on the relay");
+        CHECK(mhn_client_start(relay, MHN_PORT, 1, NULL, mac, "Host", g_pass) == MHN_OK, "room created on the relay");
     } else {
         hub = mhn_hub_new(0, 1, 0);
-        CHECK(hub && mhn_hub_make_room(hub, code) == 0 && mhn_hub_start_thread(hub) == 0, "in-app hub up");
-        CHECK(mhn_client_start("127.0.0.1", mhn_hub_port(hub), 0, code, mac, "Host") == MHN_OK, "host in its own room");
+        CHECK(hub && mhn_hub_make_room(hub, code, g_pass, "Host") == 0 && mhn_hub_start_thread(hub) == 0,
+              "in-app hub up");
+        CHECK(mhn_client_start("127.0.0.1", mhn_hub_port(hub), 0, code, mac, "Host", g_pass) == MHN_OK,
+              "host in its own room");
     }
     mhn_client_code(code);
     printf("ROOM %s\n", code);
@@ -90,7 +94,19 @@ static int join(const char *code, const char *relay) {
     if (relay) snprintf(host, sizeof host, "%s", relay);
     else CHECK(mhn_lan_find(code, host, sizeof host, &port, 3000) == 0, "room found on the LAN");
     uint8_t mac[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x02 };
-    CHECK(mhn_client_start(host, port, 0, code, mac, "Guest") == MHN_OK, "joined the room");
+
+    /* The room is listed, with its passcode lock. */
+    mhn_room_info rooms[16];
+    const int listed = relay ? mhn_hub_list(host, port, rooms, 16, 3000) : mhn_lan_list(rooms, 16, 1000);
+    int seen = -1;
+    for (int i = 0; i < listed; i++) if (!strcmp(rooms[i].code, code)) seen = i;
+    CHECK(seen >= 0 && rooms[seen].players == 1 && rooms[seen].locked == (g_pass[0] != 0),
+          "the room is in the list, one player, locked as it should be");
+    if (g_pass[0])
+        CHECK(mhn_client_start(host, port, 0, code, mac, "Guest", "0000") == MHN_BAD_PASSCODE,
+              "a wrong passcode is refused");
+
+    CHECK(mhn_client_start(host, port, 0, code, mac, "Guest", g_pass) == MHN_OK, "joined the room");
 
     mhn_ctl_scan();
     CHECK(wait_event(MHN_EV_SCAN, 3000) == 0, "scan finished");
@@ -151,9 +167,10 @@ static int join(const char *code, const char *relay) {
 
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
+    if (argc >= 3 && !strcmp(argv[argc - 2], "--pass")) { g_pass = argv[argc - 1]; argc -= 2; }
     if (argc >= 2 && !strcmp(argv[1], "host")) return host(NULL);
     if (argc >= 3 && !strcmp(argv[1], "relay")) return host(argv[2]);
     if (argc >= 3 && !strcmp(argv[1], "join")) return join(argv[2], argc >= 4 ? argv[3] : NULL);
-    fprintf(stderr, "usage: mhfu_netcheck host | relay HOST | join CODE [HOST]\n");
+    fprintf(stderr, "usage: mhfu_netcheck host | relay HOST | join CODE [HOST]   [--pass 1234]\n");
     return 2;
 }
