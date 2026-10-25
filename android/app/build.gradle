@@ -54,5 +54,7 @@ android {
 
     lint {
         abortOnError false
+        // Lint's worker crashes on this project (a recompiled game is a lot of C); skip it in release builds.
+        checkReleaseBuilds false
     }
 }
