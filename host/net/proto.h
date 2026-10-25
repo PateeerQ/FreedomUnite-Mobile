@@ -61,7 +61,16 @@ enum {
     MHN_PTP_FIN = 25,       /* closed */
 
     MHN_PING = 30,          /* either way, no body: keeps NATs and idle sockets alive */
+
+    /* The room's chat (MHFU has none of its own; Select opens it, chat.c).
+     * Hubs that predate it ignore it, as they ignore any type they do not know. */
+    MHN_CHAT = 31,          /* c->h: UTF-8 text, 1..MHN_CHAT_MAX bytes, no NUL.
+                             * h->c: u8 mac[6], char nick[128], then the text: to everyone else in the room */
 };
+
+#define MHN_CHAT_MAX     200           /* bytes of one message */
+#define MHN_CHAT_BURST   5             /* a hub passes at most this many messages from one player ... */
+#define MHN_CHAT_WINDOW_MS 10000       /* ... in this long; more are dropped */
 
 enum {
     MHN_OK = 0,
