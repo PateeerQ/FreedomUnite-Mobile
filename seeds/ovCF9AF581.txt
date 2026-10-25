@@ -1,3 +1,5 @@
-# stage066.ovl (66936BAD), slot 4.
+# game_sub.ovl (CF9AF581), slot 2.
 # Functions only reached through a pointer built at run time (dispatch misses).
-09D63260
+09CC7378
+09CC4190
+09CBAB70

@@ -1,4 +1,4 @@
-# lobby_task.ovl (56F2B002), loaded at 0x09A5F200 in slot 1.
+# lobby_task.ovl (208A07B1), loaded at 0x09A5F200 in slot 1.
 # Functions only reached through a pointer built at run time; each was a
 # dispatch miss on the way into the village.
 09A6BFA8
