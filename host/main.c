@@ -376,6 +376,11 @@ static void android_args(int *argc, char ***argv) {
     const char *dir = SDL_GetAndroidExternalStoragePath();
     snprintf(base, sizeof base, "%s", dir ? dir : "/sdcard/Android/data/com.pateeerq.mhfu/files");
     snprintf(log, sizeof log, "%s/run.log", base);
+    {   /* the last run's log stays, as run-prev.log: what went wrong is in the run before */
+        char prev[600];
+        snprintf(prev, sizeof prev, "%s/run-prev.log", base);
+        rename(log, prev);
+    }
     /* One open file for both: two would each keep their own offset and
      * write over each other. */
     if (freopen(log, "w", stdout)) dup2(fileno(stdout), fileno(stderr));
@@ -520,7 +525,7 @@ int main(int argc, char **argv) {
     mhfu_adhoc_register();
     if (net_create || net_join) {
         char err[256], status[128];
-        if ((net_create ? mhfu_lobby_create(net_pass, err, sizeof err)
+        if ((net_create ? mhfu_lobby_create(net_pass, mhfu_lobby_has_relay(), err, sizeof err)
                         : mhfu_lobby_join(net_join, net_pass, err, sizeof err)) != 0)
             printf("net: %s\n", err);
         mhfu_lobby_status(status, sizeof status);
