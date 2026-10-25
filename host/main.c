@@ -302,7 +302,41 @@ static void on_miss(uint32_t addr) {
     exit(1);
 }
 
+/* A host crash (an access violation in the host or a recompiled body) used to
+ * end the log mid-line with no report. Now it says what and where, then
+ * reports. A second fault inside the report just ends the process. */
+#ifdef _WIN32
+static LONG WINAPI on_crash(EXCEPTION_POINTERS *ep) {
+    static volatile LONG once;
+    if (InterlockedExchange(&once, 1)) return EXCEPTION_EXECUTE_HANDLER;
+    const EXCEPTION_RECORD *er = ep->ExceptionRecord;
+    char mod[MAX_PATH] = "?";
+    HMODULE hm = NULL;
+    uintptr_t base = 0;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCSTR)er->ExceptionAddress, &hm) && hm) {
+        GetModuleFileNameA(hm, mod, sizeof mod);
+        base = (uintptr_t)hm;
+    }
+    const char *leaf = strrchr(mod, '\\');
+    printf("\nhost crash: exception 0x%08lX at %p (%s+0x%llX), thread %lu",
+           (unsigned long)er->ExceptionCode, er->ExceptionAddress, leaf ? leaf + 1 : mod,
+           (unsigned long long)((uintptr_t)er->ExceptionAddress - base), (unsigned long)GetCurrentThreadId());
+    if (er->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && er->NumberParameters >= 2)
+        printf(", %s 0x%llX", er->ExceptionInformation[0] == 1 ? "writing" : er->ExceptionInformation[0] == 8 ? "executing" : "reading",
+               (unsigned long long)er->ExceptionInformation[1]);
+    printf("\n  guest: last function 0x%08X, pc-ish ra 0x%08X sp 0x%08X\n", psp_trace_last(),
+           psp_cpu.r[PSP_REG_RA], psp_cpu.r[PSP_REG_SP]);
+    fflush(stdout);
+    report();
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+#endif
+
 int main(int argc, char **argv) {
+#ifdef _WIN32
+    SetUnhandledExceptionFilter(on_crash);
+#endif
     if (argc < 3) {
         fprintf(stderr, "usage: %s <decrypted EBOOT> <root dir> [--iso FILE] [--budget N] [--seconds N]"
                 " [--window [SCALE]] [--press SCRIPT] [--snap N] [--name NAME]\n"
