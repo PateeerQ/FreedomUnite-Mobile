@@ -33,6 +33,14 @@ void mhfu_audio_stats(uint64_t *in, uint64_t *short_, uint64_t *dropped) {
     *in = g_in_frames; *short_ = g_short_frames; *dropped = g_dropped_frames;
 }
 
+double mhfu_audio_latency_ms(void) {
+    const uint64_t n = g_lat_n, sum = g_lat_sum;
+    g_lat_n = 0;
+    g_lat_sum = 0;
+    const double ring = n ? (double)sum / (double)n : 0.0;
+    return (ring + (double)g_dev_frames) * 1000.0 / 44100.0;
+}
+
 /* psprecomp's sceAudio hands every buffer here (patch 0014). */
 static void sink(int ch, const int16_t *pcm, uint32_t frames, int stereo, int vol_l, int vol_r) {
     if (ch < 0 || ch >= CHANNELS || !pcm) return;
@@ -53,12 +61,18 @@ static void sink(int ch, const int16_t *pcm, uint32_t frames, int stereo, int vo
     r->wr = wr + frames;
 }
 
+/* Latency, for the log: the fullest ring as the output reads it, summed over
+ * reads, plus what the output device still holds (set by the SDL path). */
+static volatile uint64_t g_lat_sum, g_lat_n, g_dev_frames;
+
 static void mix(int16_t *out, uint32_t frames) {
     static int32_t acc[2 * 2048];
     memset(acc, 0, (size_t)frames * 2 * sizeof acc[0]);
+    uint32_t fullest = 0;
     for (int c = 0; c < CHANNELS; c++) {
         ring *r = &g_ring[c];
         uint32_t have = r->wr - r->rd, n = have < frames ? have : frames;
+        if (have > fullest) fullest = have;
         /* A channel that has played and now runs short leaves a gap. */
         if (r->wr && n < frames) g_short_frames += frames - n;
         for (uint32_t i = 0; i < n; i++) {
@@ -68,6 +82,8 @@ static void mix(int16_t *out, uint32_t frames) {
         }
         r->rd += n;
     }
+    g_lat_sum += fullest;
+    g_lat_n++;
     for (uint32_t i = 0; i < frames * 2; i++)
         out[i] = (int16_t)(acc[i] > 32767 ? 32767 : acc[i] < -32768 ? -32768 : acc[i]);
 }
@@ -89,6 +105,7 @@ static void SDLCALL pull(void *user, SDL_AudioStream *stream, int additional, in
         SDL_PutAudioStreamData(stream, pcm, (int)frames * 4);
         additional -= (int)frames * 4;
     }
+    g_dev_frames = (uint64_t)(SDL_GetAudioStreamQueued(stream) / 4);
 }
 
 int mhfu_audio_start(void) {

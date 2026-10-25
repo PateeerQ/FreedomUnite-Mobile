@@ -13,4 +13,9 @@ int mhfu_audio_start(void);
 #include <stdint.h>
 void mhfu_audio_stats(uint64_t *in, uint64_t *short_, uint64_t *dropped);
 
+/* How far behind the game the sound is heard, averaged since the last call:
+ * what waits in the channel rings plus what the output device holds. Not
+ * counted: psprecomp's own lead on blocking output (35 ms). */
+double mhfu_audio_latency_ms(void);
+
 #endif
