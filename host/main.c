@@ -361,7 +361,8 @@ int main(int argc, char **argv) {
     char ms_dir[600];
     snprintf(ms_dir, sizeof ms_dir, "%s/ms", g_root);
     mhfu_utility_register(ms_dir);
-    mhfu_utility_set_osk_text(name);
+    /* Without --name the window asks; a scripted run (--press) cannot type. */
+    mhfu_utility_set_osk_text(name ? name : press ? "Hunter" : NULL);
     /* Multiplayer: the room the game's ad hoc play goes through. The window's
      * Multiplayer menu does the same as these two options. */
     mhfu_lobby_init(g_root, nick, mac, relay);

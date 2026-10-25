@@ -42,6 +42,7 @@
 #endif
 
 #include "utility.h"
+#include "window.h"
 
 enum { ST_NONE, ST_INIT, ST_RUNNING, ST_FINISHED, ST_SHUTDOWN };
 
@@ -646,42 +647,97 @@ static void hle_MsgDialogShutdownStart(void) {
 /* The on-screen keyboard. SceUtilityOskParams: common (48), fieldCount,
  * fields -> SceUtilityOskData[]: language@8, inputtype@16, lines@20,
  * desc@28, intext@32, outtextlength@36, outtext@40, result@44,
- * outtextlimit@48 (52 bytes each). Strings are UTF-16. There is no keyboard
- * to show, so every field is answered with the text from --name. */
-#define OSK_RESULT_CHANGED 2
+ * outtextlimit@48 (52 bytes each). Strings are UTF-16. With the window, the
+ * first field is typed into a text box (window.h) and the dialog stays
+ * RUNNING until it is closed; otherwise (or with --name) every field is
+ * answered with the text from --name. Cancel leaves the text as it was, as
+ * on the PSP. */
+#define OSK_RESULT_CANCELLED 1
+#define OSK_RESULT_CHANGED   2
+static int g_osk_fixed;         /* --name given: never ask */
+static int g_osk_asking;        /* the window's text box is open */
 static void utf16_to_ascii(uint32_t at, char *out, size_t cap) {
     size_t n = 0;
     if (at) for (uint32_t c; n + 1 < cap && (c = psp_read16(at + (uint32_t)n * 2)) != 0; n++)
         out[n] = c < 0x80 ? (char)c : '?';
     out[n] = 0;
 }
+static void utf16_read(uint32_t at, uint16_t *out, int cap) {
+    int n = 0;
+    if (at) for (uint16_t c; n + 1 < cap && (c = psp_read16(at + (uint32_t)n * 2)) != 0; n++) out[n] = c;
+    out[n] = 0;
+}
+/* Room in a field's outtext, in characters with the NUL. */
+static uint32_t osk_room(uint32_t f) {
+    uint32_t room = psp_read32(f + 36), limit = psp_read32(f + 48);
+    if (limit && limit < room) room = limit + 1;
+    return room;
+}
+/* Answers every field: `text` (NULL keeps each field's intext), with `result`. */
+static void osk_answer(const uint16_t *text, uint32_t result, int cancelled) {
+    uint32_t p = g_osk.param;
+    int32_t nfields = (int32_t)psp_read32(p + 48);
+    uint32_t fields = psp_read32(p + 52);
+    for (int32_t i = 0; i < nfields && i < 8 && fields; i++) {
+        uint32_t f = fields + (uint32_t)i * 52;
+        uint16_t in[128];
+        utf16_read(psp_read32(f + 32), in, 128);
+        const uint16_t *src = text ? text : in;
+        uint32_t out = psp_read32(f + 40), room = osk_room(f), n = 0;
+        if (out && room) {
+            for (; src[n] && n + 1 < room; n++) psp_write16(out + n * 2, src[n]);
+            psp_write16(out + n * 2, 0);
+        }
+        psp_write32(f + 44, result);
+        char desc[64], got[128];
+        utf16_to_ascii(psp_read32(f + 28), desc, sizeof desc);
+        utf16_to_ascii(out, got, sizeof got);
+        printf("keyboard: \"%s\" -> \"%s\"%s\n", desc, got, cancelled ? " (cancelled)" : "");
+    }
+    psp_write32(p + 28, cancelled ? 1 : 0);     /* common.result */
+}
 static void hle_OskInitStart(void) {
     uint32_t p = psp_arg(0);
     if (start(&g_osk, p) != 0) { psp_ret(SCE_ERROR_UTILITY_INVALID_STATUS); return; }
     int32_t nfields = (int32_t)psp_read32(p + 48);
     uint32_t fields = psp_read32(p + 52);
-    for (int32_t i = 0; i < nfields && i < 8 && fields; i++) {
-        uint32_t f = fields + (uint32_t)i * 52;
-        char desc[64], in[64];
-        utf16_to_ascii(psp_read32(f + 28), desc, sizeof desc);
-        utf16_to_ascii(psp_read32(f + 32), in, sizeof in);
-        uint32_t out = psp_read32(f + 40), limit = psp_read32(f + 48);
-        uint32_t room = psp_read32(f + 36);             /* outtextlength, in chars */
-        if (limit && limit < room) room = limit + 1;
-        uint32_t n = 0;
-        if (out && room) {
-            for (; g_osk_text[n] && n + 1 < room; n++) psp_write16(out + n * 2, (uint8_t)g_osk_text[n]);
-            psp_write16(out + n * 2, 0);
-        }
-        psp_write32(f + 44, OSK_RESULT_CHANGED);
-        printf("keyboard: \"%s\" (was \"%s\") -> \"%.*s\" (use run.ps1 -Name to change)\n",
-               desc, in, (int)n, g_osk_text);
+    g_osk_asking = 0;
+    if (!g_osk_fixed && nfields > 0 && fields) {
+        char desc[64];
+        uint16_t in[128];
+        utf16_to_ascii(psp_read32(fields + 28), desc, sizeof desc);
+        utf16_read(psp_read32(fields + 32), in, 128);
+        uint32_t room = osk_room(fields);
+        g_osk_asking = mhfu_window_ask_text(desc, in, room > 1 ? (int)room - 1 : 0) == 0;
     }
-    psp_write32(p + 28, 0);                     /* common.result */
+    if (!g_osk_asking) {
+        uint16_t text[64];
+        int n = 0;
+        for (; g_osk_text[n] && n < 63; n++) text[n] = (uint8_t)g_osk_text[n];
+        text[n] = 0;
+        osk_answer(text, OSK_RESULT_CHANGED, 0);
+    }
     psp_ret(0);
 }
-static void hle_OskGetStatus(void)   { psp_ret(step(&g_osk)); }
-static void hle_OskUpdate(void)      { if (g_osk.status == ST_RUNNING) g_osk.status = ST_FINISHED; psp_ret(0); }
+/* While the text box is open the dialog stays RUNNING. */
+static int osk_waiting(void) {
+    if (!g_osk_asking) return 0;
+    uint16_t text[128];
+    int n = mhfu_window_text_result(text, 128);
+    if (n == -1) return 1;
+    g_osk_asking = 0;
+    if (n < 0) osk_answer(NULL, OSK_RESULT_CANCELLED, 1);
+    else osk_answer(text, OSK_RESULT_CHANGED, 0);
+    return 0;
+}
+static void hle_OskGetStatus(void) {
+    if (g_osk.status == ST_RUNNING && osk_waiting()) { psp_ret(ST_RUNNING); return; }
+    psp_ret(step(&g_osk));
+}
+static void hle_OskUpdate(void) {
+    if (g_osk.status == ST_RUNNING && !osk_waiting()) g_osk.status = ST_FINISHED;
+    psp_ret(0);
+}
 static void hle_OskShutdownStart(void) {
     if (g_osk.status != ST_FINISHED && g_osk.status != ST_RUNNING) { psp_ret(SCE_ERROR_UTILITY_INVALID_STATUS); return; }
     dlg_shutdown(&g_osk);
@@ -689,7 +745,7 @@ static void hle_OskShutdownStart(void) {
 }
 
 void mhfu_utility_set_osk_text(const char *text) {
-    if (text && *text) snprintf(g_osk_text, sizeof g_osk_text, "%s", text);
+    if (text && *text) { snprintf(g_osk_text, sizeof g_osk_text, "%s", text); g_osk_fixed = 1; }
 }
 
 void mhfu_utility_register(const char *ms_dir) {
