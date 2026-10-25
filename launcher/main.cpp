@@ -6,6 +6,7 @@
 //   Controller    the connected controllers, which one the game uses, a tester
 //   Advanced      updates, closing on start, extra environment and arguments, files
 //   Log           the running game's output (work/run.log)
+//   About         who maintains it, what it is built on
 //
 // The look borrows from Monster Hunter's own menus: dark leather and wood,
 // gold-trimmed panels with diamond studs, a quest-board "Depart". The banner
@@ -264,8 +265,8 @@ static bool depart_button(const char *label, const char *sub, ImVec2 size, bool 
 
 // ---- state ---------------------------------------------------------------------
 
-enum Page { PLAY, ACHIEVEMENTS, KEYBOARD, CONTROLLER, ADVANCED, LOG, NPAGES };
-static const char *k_pages[NPAGES] = {"Play", "Achievements", "Keyboard", "Controller", "Advanced", "Log"};
+enum Page { PLAY, ACHIEVEMENTS, KEYBOARD, CONTROLLER, ADVANCED, LOG, ABOUT, NPAGES };
+static const char *k_pages[NPAGES] = {"Play", "Achievements", "Keyboard", "Controller", "Advanced", "Log", "About"};
 
 static Config g_cfg;
 static bool g_dirty;
@@ -1047,6 +1048,42 @@ static void page_advanced(float w, float) {
 
 // ---- Log -------------------------------------------------------------------------------------
 
+static void page_about(float w, float) {
+    ImGui::SetCursorPos(ImVec2(30, 24));
+    ImGui::BeginChild("about", ImVec2(w - 60, -20));
+    page_title("About", nullptr);
+    begin_panel("aboutp", ImVec2(0, 0));
+    const Tex crest = texture((fs::u8path(paths::exe_dir()) / "mhfu.png").u8string());
+    if (crest.id) {
+        ImGui::Image((ImTextureID)(intptr_t)crest.id, ImVec2(128, 128));
+        ImGui::SameLine(0, 24);
+    }
+    ImGui::BeginGroup();
+    ImGui::PushFont(g_title);
+    ImGui::TextColored(C_GOLD, "%s", MHFU_APP_NAME);
+    ImGui::PopFont();
+    ImGui::TextColored(C_TEXT, "Version %s  \xC2\xB7  Windows", MHFU_VERSION);
+    ImGui::Spacing();
+    ImGui::PushFont(g_big);
+    ImGui::TextColored(C_TEXT, "Maintained by %s", MHFU_MAINTAINER);
+    ImGui::PopFont();
+    if (ImGui::Button("github.com/" MHFU_REPO)) open_in_shell(MHFU_REPO_URL);
+    ImGui::EndGroup();
+    ImGui::Spacing();
+    heading("What it is");
+    dim("A native port of Monster Hunter Freedom Unite (PSP, ULES01213): the game's own code, statically "
+        "recompiled to x86-64 with psprecomp, running on a reimplementation of the PSP's firmware. No "
+        "emulator in between.");
+    heading("Built on");
+    dim("psprecomp (sp00nznet) \xC2\xB7 SDL3 \xC2\xB7 FFmpeg (LGPL) \xC2\xB7 rcheevos \xC2\xB7 Dear ImGui \xC2\xB7 "
+        "nlohmann/json \xC2\xB7 stb. PPSSPP's source was the reference for the firmware's behaviour.");
+    heading("Notice");
+    dim("Not affiliated with or endorsed by Capcom. Monster Hunter is a trademark of Capcom. Play with your "
+        "own copy of the game: no game files come with this program.");
+    ImGui::EndChild();
+    ImGui::EndChild();
+}
+
 static void page_log(float w, float) {
     ImGui::SetCursorPos(ImVec2(30, 24));
     ImGui::BeginChild("logp", ImVec2(w - 60, -20));
@@ -1099,6 +1136,8 @@ int main(int, char **) {
     if (!file_exists(keys_path())) keys_save(keys_path(), g_keys);
 
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    SDL_SetHint(SDL_HINT_WINDOWS_INTRESOURCE_ICON, "1");          // the crest (assets/icon/mhfu.rc)
+    SDL_SetHint(SDL_HINT_WINDOWS_INTRESOURCE_ICON_SMALL, "1");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMEPAD)) return 1;
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
@@ -1209,6 +1248,7 @@ int main(int, char **) {
         case KEYBOARD: page_keyboard(cw, ch); break;
         case CONTROLLER: page_controller(cw, ch); break;
         case ADVANCED: page_advanced(cw, ch); break;
+        case ABOUT: page_about(cw, ch); break;
         default: page_log(cw, ch); break;
         }
         ImGui::EndChild();
