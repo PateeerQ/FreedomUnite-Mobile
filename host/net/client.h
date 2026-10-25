@@ -58,6 +58,17 @@ int  mhn_lan_list(mhn_room_info *out, int max, int timeout_ms);
 /* The rooms on one hub (a relay): how many were written, -1 if unreachable. */
 int  mhn_hub_list(const char *host, uint16_t port, mhn_room_info *out, int max, int timeout_ms);
 
+/* ---- the room's chat ---- */
+
+/* Send a line (UTF-8, cut to MHN_CHAT_MAX bytes) to everyone else in the room.
+ * 0 if it went out, -1 when not in a room. */
+int  mhn_chat_send(const char *text);
+/* The oldest line that came in: 1 and its sender, 0 when none is waiting.
+ * `*joined` is 0 for a chat line; 1 or -1 when `nick` came into the room or
+ * left it (text empty). Those already in the room when this player came in
+ * are not news: see mhn_client_members. */
+int  mhn_chat_next(char *nick, int nick_cap, char *text, int text_cap, int *joined);
+
 /* ---- adhocctl ---- */
 
 enum { MHN_EV_CONNECT = 1, MHN_EV_DISCONNECT = 2, MHN_EV_SCAN = 3 };

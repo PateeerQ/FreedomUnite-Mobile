@@ -18,6 +18,8 @@
 #define PTP_BACKLOG_MAX 16
 #define PING_MS         10000
 
+#define CHAT_QUEUE      32              /* lines that came in, waiting for chat.c */
+
 typedef struct dgram {
     struct dgram *next;
     uint64_t at_ms;              /* when it arrived, for mhn_pdp_stats */
@@ -71,6 +73,10 @@ static struct {
 
     sock sk[MHN_MAX_SOCKETS + 1];
     uint16_t next_port;
+
+    struct { char nick[MHN_NICK_LEN]; char text[MHN_CHAT_MAX + 1]; int joined; } chat[CHAT_QUEUE];
+    int nchat;
+    uint64_t online_ms;          /* when this player came into the room */
 } g;
 
 /* Datagrams in, read by the game, dropped; and how long the read ones waited. */
@@ -241,10 +247,31 @@ static void on_traffic(int type, const uint8_t *b, uint32_t len) {
     }
 }
 
+/* A line for chat.c; under g.lock. */
+static void chat_push(const uint8_t *nick, const uint8_t *text, uint32_t n, int joined) {
+    if (g.nchat == CHAT_QUEUE) {                       /* nobody is reading: the oldest goes */
+        memmove(g.chat, g.chat + 1, sizeof g.chat[0] * (CHAT_QUEUE - 1));
+        g.nchat--;
+    }
+    memcpy(g.chat[g.nchat].nick, nick, MHN_NICK_LEN);
+    g.chat[g.nchat].nick[MHN_NICK_LEN - 1] = 0;
+    if (n > MHN_CHAT_MAX) n = MHN_CHAT_MAX;
+    if (n) memcpy(g.chat[g.nchat].text, text, n);
+    g.chat[g.nchat].text[n] = 0;
+    g.chat[g.nchat].joined = joined;
+    g.nchat++;
+}
+
+/* Right after WELCOME the hub names everyone already in the room, as MEMBER
+ * frames like any other; for this long they are not "joined" news. */
+#define MEMBERS_SETTLE_MS 1500
+
 static void on_frame(int type, const uint8_t *b, uint32_t len) {
     switch (type) {
     case MHN_MEMBER:
-        if (len >= 7 + MHN_NICK_LEN) peer_update(g.members, &g.nmembers, b[0], b + 1, (const char *)b + 7);
+        if (len < 7 + MHN_NICK_LEN) break;
+        peer_update(g.members, &g.nmembers, b[0], b + 1, (const char *)b + 7);
+        if (net_now_ms() - g.online_ms > MEMBERS_SETTLE_MS) chat_push(b + 7, NULL, 0, b[0] ? 1 : -1);
         break;
     case MHN_CTL_CONNECTED:
         if (len < MHN_GROUP_LEN + 6) break;
@@ -272,6 +299,9 @@ static void on_frame(int type, const uint8_t *b, uint32_t len) {
     case MHN_PDP: case MHN_PTP_SYN: case MHN_PTP_ACK: case MHN_PTP_RST:
     case MHN_PTP_DATA: case MHN_PTP_FIN:
         on_traffic(type, b, len);
+        break;
+    case MHN_CHAT:
+        if (len > 6 + MHN_NICK_LEN) chat_push(b + 6, b + 6 + MHN_NICK_LEN, len - 6 - MHN_NICK_LEN, 0);
         break;
     default:
         break;
@@ -361,8 +391,9 @@ int mhn_client_start(const char *host, uint16_t port, int create, const char *co
     net_lock(g.lock);
     memcpy(g.code, w + 9, MHN_CODE_LEN);
     g.code[MHN_CODE_LEN - 1] = 0;
-    g.nmembers = g.npeers = g.nscan = g.nev = 0;
+    g.nmembers = g.npeers = g.nscan = g.nev = g.nchat = 0;
     g.in_group = 0;
+    g.online_ms = net_now_ms();
     g.online = 1;
     g.stop = 0;
     net_unlock(g.lock);
@@ -516,6 +547,30 @@ int mhn_hub_list(const char *host, uint16_t port, mhn_room_info *out, int max, i
 }
 
 /* ---- adhocctl ---- */
+
+int mhn_chat_send(const char *text) {
+    size_t n = strlen(text);
+    if (!n) return 0;
+    if (n > MHN_CHAT_MAX) {
+        n = MHN_CHAT_MAX;
+        while (n && ((unsigned char)text[n] & 0xC0) == 0x80) n--;   /* not inside a UTF-8 character */
+    }
+    return send_frame(MHN_CHAT, text, (uint32_t)n) == 0 ? 0 : -1;
+}
+
+int mhn_chat_next(char *nick, int nick_cap, char *text, int text_cap, int *joined) {
+    ensure_locks();
+    net_lock(g.lock);
+    int got = g.nchat > 0;
+    if (got) {
+        snprintf(nick, (size_t)nick_cap, "%s", g.chat[0].nick);
+        snprintf(text, (size_t)text_cap, "%s", g.chat[0].text);
+        if (joined) *joined = g.chat[0].joined;
+        memmove(g.chat, g.chat + 1, sizeof g.chat[0] * (size_t)(--g.nchat));
+    }
+    net_unlock(g.lock);
+    return got;
+}
 
 void mhn_ctl_connect(const char group[MHN_GROUP_LEN]) { send_frame(MHN_CTL_CONNECT, group, MHN_GROUP_LEN); }
 
