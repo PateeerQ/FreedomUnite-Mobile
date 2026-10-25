@@ -141,9 +141,15 @@ int main(int argc, char **argv) {
         /* The delay slot may be a nop, which the loop above took for padding:
          * then `p` is the jump itself. Missing that case left 40 functions of
          * game_sub.ovl undiscovered (each a dispatch miss in the village). */
+        /* `jr $t9` is a tail call through a pointer: game_task.ovl's virtual
+         * call thunks end in it, and the function after one was only ever
+         * reached through a pointer (a dispatch miss on the way to a quest).
+         * Other `jr` registers are left out: those are switch tables. */
         int after_return = p >= HDR + 4 && (rd(p - 4) == 0x03E00008u ||  /* jr $ra; delay */
+                                            rd(p - 4) == 0x03200008u ||   /* jr $t9; delay */
                                             (rd(p - 4) >> 26) == 0x02 ||  /* j; delay      */
-                                            (zeros && (rd(p) == 0x03E00008u || (rd(p) >> 26) == 0x02)));
+                                            (zeros && (rd(p) == 0x03E00008u || rd(p) == 0x03200008u ||
+                                                       (rd(p) >> 26) == 0x02)));
         if (after_return || zeros >= 2) starts[nstart++] = g_base + o;
     }
     for (uint32_t i = 0; i < nstart; i++) add_rel(g_base + seg_len + 4 * i, R_MIPS_32);

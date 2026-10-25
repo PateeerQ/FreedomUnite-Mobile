@@ -503,8 +503,33 @@ static void hle_IcacheInvalidateAll(void) {
 static void hle_SuspendDispatchThread(void) { psp_ret(1); }
 static void hle_ResumeDispatchThread(void)  { psp_ret(0); }
 
+/* sceKernelVolatileMemLock(type, &addr, &size): the 4 MB at 0x08400000 that
+ * the system keeps for itself, lent to the game (PPSSPP's sceSuspendForUser).
+ * MHFU takes it on the way into a quest region. TryLock is the same, but
+ * fails instead of waiting while it is lent out. */
+#define VOLATILE_ADDR   0x08400000u
+#define VOLATILE_SIZE   0x00400000u
+#define ERR_VMEM_IN_USE 0x802B0200u
+static int g_volatile_locked;
+static void volatile_lock(void) {
+    uint32_t paddr = psp_arg(1), psize = psp_arg(2);
+    if (g_volatile_locked) { psp_ret(ERR_VMEM_IN_USE); return; }
+    g_volatile_locked = 1;
+    if (paddr) psp_write32(paddr, VOLATILE_ADDR);
+    if (psize) psp_write32(psize, VOLATILE_SIZE);
+    psp_ret(0);
+}
+static void hle_VolatileMemUnlock(void) {
+    g_volatile_locked = 0;
+    psp_ret(0);
+}
+
 void mhfu_hle_register(const char *overlay_dir) {
     snprintf(g_ovl_dir, sizeof g_ovl_dir, "%s", overlay_dir ? overlay_dir : "");
+    g_volatile_locked = 0;
+    psp_hle_register(0x3E0271D3, "sceSuspendForUser", "sceKernelVolatileMemLock",    volatile_lock);
+    psp_hle_register(0xA14F40B2, "sceSuspendForUser", "sceKernelVolatileMemTryLock", volatile_lock);
+    psp_hle_register(0xA569E425, "sceSuspendForUser", "sceKernelVolatileMemUnlock",  hle_VolatileMemUnlock);
     memset(g_ovl_hash, 0, sizeof g_ovl_hash);
 
     psp_hle_register(0x920F104A, "UtilsForUser", "sceKernelIcacheInvalidateAll", hle_IcacheInvalidateAll);
