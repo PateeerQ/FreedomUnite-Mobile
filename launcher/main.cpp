@@ -543,12 +543,22 @@ static void page_play(float w, float h) {
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("The game at 60 frames a second. In a room everyone plays at the slowest player's rate.\n"
                           "Beta: tell PateeerQ if something runs too fast or too slow. F4 in game toggles it.");
+    label("Volume");
+    ImGui::SetNextItemWidth(width - lw);
+    if (ImGui::SliderInt("##volume", &g_cfg.volume, 0, 100, g_cfg.volume ? "%d%%" : "Muted")) changed();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("The game's sound and music. F5 / F6 in game turn it down / up.");
+    label("Mouse camera");
+    ImGui::SetNextItemWidth(width - lw);
+    if (ImGui::SliderInt("##mouse", &g_cfg.mouse_sens, 25, 300, "%d%%")) changed();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Hold the right mouse button and move the mouse to turn the camera.\n"
+                          "F7 in game: mouse look without holding the button. This is how fast it turns.");
     label("Hunter name");
     ImGui::SetNextItemWidth(width - lw);
     if (ImGui::InputTextWithHint("##nick", "multiplayer name", &g_cfg.nick)) changed();
     ImGui::PushFont(g_small);
     ImGui::SetCursorPosX(lw);
-    ImGui::TextColored(C_DIM, "F11 or Alt+Enter: fullscreen in game  \xC2\xB7  F4: 60 FPS");
+    ImGui::TextColored(C_DIM, "F11 or Alt+Enter: fullscreen in game  \xC2\xB7  F4: 60 FPS  \xC2\xB7  F5/F6: volume  \xC2\xB7  F7: mouse look");
     ImGui::PopFont();
     ImGui::EndChild();
 
@@ -558,6 +568,13 @@ static void page_play(float w, float h) {
     ImDrawList *dl = ImGui::GetWindowDrawList();
     dl->AddLine(bp - ImVec2(0, 8), bp + ImVec2(total, -8), col(C_FRAME, 0.4f), 1.0f);
     const bool running = game_running();
+    // The game's Options menu (and F5/F6) may have changed these in launcher.ini.
+    static bool was_running;
+    if (was_running && !running) {
+        Config now;
+        if (config_load(now)) { g_cfg.volume = now.volume; g_cfg.mouse_sens = now.mouse_sens; }
+    }
+    was_running = running;
     ImGui::BeginGroup();
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 10);
     ImGui::TextColored(C_DIM, "%s  \xC2\xB7  %s  \xC2\xB7  %s  \xC2\xB7  profile %s", k_scales[g_cfg.render_scale - 1],
