@@ -23,6 +23,7 @@
 #include "input.h"
 #include "keys.h"
 #include "lobby.h"
+#include "mods.h"
 #include "net/client.h"
 #include "stats.h"
 
@@ -312,6 +313,7 @@ static int vpad_visible(void) {
  * so a change shows after a restart. */
 static int g_res_setting;
 static int g_fps60;                  /* the 60 fps mode (mhfu_fps_set_preferred) */
+static int g_wide;                   /* the widescreen mod (mhfu_mod_set_widescreen) */
 
 static char g_settings_path[1024];
 static void settings_load(void) {
@@ -330,6 +332,7 @@ static void settings_load(void) {
         if (sscanf(line, "button_opacity=%d", &v) == 1 && v >= 10 && v <= 100) g_vpad_alpha = v;
         if (sscanf(line, "resolution=%d", &v) == 1 && v >= 1 && v <= 4) g_res_setting = v;
         if (sscanf(line, "fps60=%d", &v) == 1) g_fps60 = v != 0;
+        if (sscanf(line, "widescreen=%d", &v) == 1) g_wide = v != 0;
         if (sscanf(line, "layout_%31[a-z]=%f,%f,%f", name, &x, &y, &k) == 4)
             for (int g = 0; g < G_COUNT; g++)
                 if (!strcmp(name, k_group_name[g])) g_place[g] = (placed){ 1, x, y, k };
@@ -342,7 +345,7 @@ static void settings_save(void) {
     fprintf(f, "# MHFU: the in-game menu's settings\nvirtual_gamepad=%d\nshow_fps=%d\nbutton_opacity=%d\n",
             g_vpad_mode, g_show_fps_init, g_vpad_alpha);
     if (g_res_setting) fprintf(f, "resolution=%d\n", g_res_setting);
-    fprintf(f, "fps60=%d\n", g_fps60);
+    fprintf(f, "fps60=%d\nwidescreen=%d\n", g_fps60, g_wide);
     for (int g = 0; g < G_COUNT; g++)
         if (g_place[g].set)
             fprintf(f, "layout_%s=%.4f,%.4f,%.3f\n", k_group_name[g], g_place[g].cx, g_place[g].cy, g_place[g].k);
@@ -712,7 +715,7 @@ static void draw_editor(canvas *c, float s) {
  * Android dialogs (MhfuActivity, over JNI): they need text fields. */
 
 enum { R_HEAD, R_ITEM };
-enum { M_RESUME, M_NET, M_ACH, M_VPAD, M_EDIT, M_OPACITY, M_FPS, M_RES, M_SMOOTH, M_SAVES, M_FILES, M_CRASH, M_UPDATE, M_ABOUT, M_EXIT };
+enum { M_RESUME, M_NET, M_ACH, M_VPAD, M_EDIT, M_OPACITY, M_FPS, M_RES, M_SMOOTH, M_WIDE, M_CHEATS, M_SAVES, M_FILES, M_CRASH, M_UPDATE, M_ABOUT, M_EXIT };
 typedef struct { int kind, id; const char *text; } menu_row;
 static const menu_row k_menu[] = {
     { R_HEAD, -1, "GAME" },     { R_ITEM, M_RESUME, "Back to game" },
@@ -723,6 +726,10 @@ static const menu_row k_menu[] = {
     { R_ITEM, M_OPACITY, "Button opacity" },
     { R_HEAD, -1, "DISPLAY" },  { R_ITEM, M_RES, "Resolution" }, { R_ITEM, M_SMOOTH, "60 FPS (beta)" },
     { R_ITEM, M_FPS, "Show FPS" },
+    { R_HEAD, -1, "MODS" },     { R_ITEM, M_WIDE, "Widescreen" },
+#ifdef __ANDROID__
+    { R_ITEM, M_CHEATS, "Cheats" },
+#endif
     { R_HEAD, -1, "APP" },
 #ifdef __ANDROID__
     { R_ITEM, M_SAVES, "Save folder" },
@@ -781,6 +788,13 @@ static const char *menu_value(int id) {
     case M_VPAD: return vp[g_vpad_mode];
     case M_FPS: return g_show_fps ? "On" : "Off";
     case M_SMOOTH: return !g_fps60 ? "Off" : mhfu_fps_target() >= 60 ? "On" : "On (room at 30)";
+    case M_WIDE: return mhfu_mod_widescreen() ? "On" : "Off";
+    case M_CHEATS: {
+        static char v[24];
+        if (!mhfu_cheats_active()) return "Off";
+        snprintf(v, sizeof v, mhn_client_online() ? "%d on (paused)" : "%d on", mhfu_cheats_active());
+        return v;
+    }
     case M_RES: {
         static char r[40];
         const int want = g_res_setting ? g_res_setting : g_scale;
@@ -895,10 +909,12 @@ static void menu_tap(float px, float py, float w, float h) {
             case M_VPAD: g_vpad_mode = (g_vpad_mode + 1) % 3; settings_save(); break;
             case M_FPS: g_show_fps = !g_show_fps; g_show_fps_init = g_show_fps; settings_save(); break;
             case M_SMOOTH: g_fps60 = !g_fps60; mhfu_fps_set_preferred(g_fps60 ? 60 : 30); settings_save(); break;
+            case M_WIDE: g_wide = !mhfu_mod_widescreen(); mhfu_mod_set_widescreen(g_wide); settings_save(); break;
             case M_RES: g_res_setting = (g_res_setting ? g_res_setting : g_scale) % 4 + 1; settings_save(); break;
             case M_EDIT: menu_set(0); edit_open(); break;
 #ifdef __ANDROID__
             case M_UPDATE: menu_set(0); android_call("checkUpdates"); break;
+            case M_CHEATS: menu_set(0); android_call("openCheats"); break;
             case M_NET: menu_set(0); android_call("openMultiplayer"); break;
             case M_ACH: menu_set(0); android_call("openAchievements"); break;
             case M_ABOUT: menu_set(0); android_call("openAbout"); break;
@@ -1310,6 +1326,11 @@ static bool SDLCALL app_events(void *user, SDL_Event *e) {
 }
 static void gl_size(void *user, int *w, int *h) { (void)user; SDL_GetWindowSizeInPixels(g_window, w, h); }
 
+void mhfu_window_size(int *w, int *h) {
+    *w = *h = 0;
+    if (g_window) SDL_GetWindowSizeInPixels(g_window, w, h);
+}
+
 /* ---- the API the game calls ------------------------------------------------------------ */
 
 void mhfu_window_options(int fullscreen, int out_w, int out_h, const char *keys_ini) {
@@ -1349,6 +1370,7 @@ int mhfu_window_gl(void) {
     if (psp_render_select("gl") != 0) return -1;
     g_gl = 1;
     if (g_fps60) mhfu_fps_set_preferred(60);
+    if (g_wide) mhfu_mod_set_widescreen(1);
     wake(g_ev_wake);
     return 0;
 }
