@@ -196,6 +196,9 @@ bool game_start(const Config &c, std::string &err) {
 
     std::map<std::string, std::string> env{{"MHFU_RENDER", "gl"}};
     if (c.fps60) env["MHFU_FPS"] = "60";
+    if (c.volume != 100) env["MHFU_VOLUME"] = std::to_string(c.volume);
+    if (c.mouse_sens != 100) env["MHFU_MOUSE_SENS"] = std::to_string(c.mouse_sens);
+    env["MHFU_LAUNCHER_INI"] = (P(paths::launcher()) / "launcher.ini").u8string();   // the game's Options menu saves there
     if (c.gamepad == "none") env["MHFU_NO_GAMEPAD"] = "1";
     else if (!c.gamepad.empty()) env["MHFU_GAMEPAD_GUID"] = c.gamepad;
     if (c.ra_ingame && !c.ra_user.empty() && !c.ra_token.empty()) {
