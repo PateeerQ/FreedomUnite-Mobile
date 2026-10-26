@@ -40,14 +40,12 @@ MODS = [
 ]
 OWN_LO, OWN_HI = 0x0891F000, 0x08922000          # where the US mods put their code and data
 
-# Overlay code moved unevenly (the EU game_task is not byte for byte the US one):
-# each address the mods use there, found in the EU overlay by its instruction.
-OVERLAY_CODE = {
-    0x09AC7AD4: 0x09AC7994, 0x09AC7AD8: 0x09AC7998,   # game_task: sh v0,0x2E4(s5) and the next
-    0x09B68A54: 0x09B68918, 0x09B68A58: 0x09B6891C,   # game_task: addiu v0,zero,6 and the next
-    0x09A6F490: 0x09A6F354,                           # game_task: a function the gathering mod calls
-    0x09C448DC: 0x09C4479C,                           # game_sub: addiu v1,zero,1
-}
+# Overlays load 0x100 lower in the EU build (the slot table: 0x09A5F200 against
+# 0x09A5F300) and their code is the same: every overlay address the mods use
+# was found at -0x100 in the EU game_task / game_sub (sh v0,740(s5) at
+# 0x09AC79D4, addiu v0,zero,6 at 0x09B68954, addiu v1,zero,1 at 0x09C447DC, a
+# function at 0x09A6F390). tools/mods_patch.py checks each hooked one again.
+OVERLAY_CODE = {}
 # Scratch the gathering mod passes to that function: high in memory (a thread's
 # stack on a PSP); here inside the mod's own space instead.
 SCRATCH = {0x09FFF4A0: 0x3E00, 0x09FFF4BE: 0x3E1E}
@@ -77,7 +75,7 @@ def us2eu(a):
     if 0x09C10000 <= a < 0x09C19100:
         return a - 0x100                              # game_task's bss (the large monster list)
     if 0x09A5F300 <= a < 0x09D63100:
-        raise ValueError(f"{a:08X}: overlay code without a checked EU address")
+        return a - 0x100                              # overlay code (slots 1-3)
     if a >= 0x09FC0000 or 0x04000000 <= a < 0x04800000:
         return a                                      # allocated from the top / VRAM: the same
     raise ValueError(f"{a:08X}: no rule")
