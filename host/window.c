@@ -25,6 +25,7 @@
 #include "lobby.h"
 #include "net/client.h"
 #include "stats.h"
+#include "mods.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -39,6 +40,76 @@
 
 static volatile LONG g_buttons;
 static volatile LONG g_stick;        /* bit 0 left, 1 right, 2 up, 3 down */
+
+/* The mouse camera: with the right button held, or with F7's mouse look on,
+ * moving the mouse turns the camera as a swipe does on Android. MHFU turns it
+ * with the d-pad, so the movement becomes the d-pad held that way for as long
+ * as it takes: MOUSE_PX_PER_S pixels make a second of turning (divided by
+ * MHFU_MOUSE_SENS percent, the launcher's slider). The cursor is hidden and
+ * kept where the look began. */
+#define MOUSE_PX_PER_S 600
+static volatile LONG g_mouse_dx, g_mouse_dy;   /* pixels moved, not yet handed to the game */
+static volatile LONG g_mouse_sens;               /* percent; 0: MHFU_MOUSE_SENS not read yet */
+
+static int mouse_sens(void) {
+    if (!g_mouse_sens) {
+        const char *e = getenv("MHFU_MOUSE_SENS");
+        const int s = e && atoi(e) > 0 ? atoi(e) : 100;
+        InterlockedExchange(&g_mouse_sens, s < 25 ? 25 : s > 300 ? 300 : s);
+    }
+    return (int)g_mouse_sens;
+}
+
+/* An Options change, kept in the launcher's settings (MHFU_LAUNCHER_INI, set
+ * by the launcher) so the next start has it too: `key=` replaced, or added. */
+static void option_save(const char *key, int value) {
+    const char *path = getenv("MHFU_LAUNCHER_INI");
+    if (!path || !*path) return;
+    static char text[64 * 1024], out[64 * 1024 + 64];
+    size_t n = 0, w = 0;
+    FILE *f = fopen(path, "rb");
+    if (f) { n = fread(text, 1, sizeof text - 1, f); fclose(f); }
+    text[n] = 0;
+    const size_t kl = strlen(key);
+    int done = 0;
+    for (char *line = text; *line;) {
+        char *end = strchr(line, '\n');
+        const size_t len = end ? (size_t)(end - line + 1) : strlen(line);
+        if (!strncmp(line, key, kl) && line[kl] == '=') {
+            w += (size_t)snprintf(out + w, sizeof out - w, "%s=%d\n", key, value);
+            done = 1;
+        } else {
+            memcpy(out + w, line, len);
+            w += len;
+        }
+        line += len;
+    }
+    if (!done) w += (size_t)snprintf(out + w, sizeof out - w, "%s%s=%d\n", w && out[w - 1] != '\n' ? "\n" : "", key, value);
+    f = fopen(path, "wb");
+    if (f) { fwrite(out, 1, w, f); fclose(f); }
+}
+static int   g_mlook_held, g_mlook_lock, g_mlook_on;
+static POINT g_mlook_at;
+
+static void mlook_update(HWND h) {
+    const int want = g_mlook_held || g_mlook_lock;
+    if (want == g_mlook_on) return;
+    g_mlook_on = want;
+    if (want) {
+        GetCursorPos(&g_mlook_at);
+        SetCapture(h);
+        RECT r;
+        GetWindowRect(h, &r);
+        ClipCursor(&r);
+        while (ShowCursor(FALSE) >= 0) { }
+    } else {
+        ReleaseCapture();
+        ClipCursor(NULL);
+        while (ShowCursor(TRUE) < 0) { }
+        InterlockedExchange(&g_mouse_dx, 0);
+        InterlockedExchange(&g_mouse_dy, 0);
+    }
+}
 static volatile LONG g_closed;
 static void        (*g_on_close)(void);
 static int           g_scale = 2;
@@ -61,8 +132,13 @@ static int  g_ntoasts;
 static int    g_show_fps = 1;
 static char   g_fps_text[96] = "FPS --";
 static char   g_overlay_line[160];          /* the FPS line and/or the ping (stats.h) */
+static ULONGLONG g_volume_until;             /* F5/F6: the volume shows until then */
 static const char *overlay_line(void) {
     mhfu_stats_overlay(g_show_fps, g_fps_text, g_overlay_line, sizeof g_overlay_line);
+    if (GetTickCount64() < g_volume_until) {
+        const size_t n = strlen(g_overlay_line);
+        snprintf(g_overlay_line + n, sizeof g_overlay_line - n, "%sVolume %d%%", n ? "   " : "", mhfu_audio_volume());
+    }
     return g_overlay_line[0] ? g_overlay_line : NULL;
 }
 static void update_fps(void) {
@@ -135,8 +211,12 @@ static void grab(void) {
 enum {
     ID_CREATE = 100, ID_JOIN, ID_LEAVE, ID_ABOUT,
     ID_DLG_OK, ID_DLG_CANCEL, ID_PASS_EDIT, ID_CODE_EDIT, ID_ROOM_LIST, ID_REFRESH, ID_TEXT_EDIT,
-    ID_WHERE_NET, ID_WHERE_LAN,
+    ID_WHERE_NET, ID_WHERE_LAN, ID_MOUSE_LOOK, ID_WIDESCREEN,
+    ID_VOLUME = 200,                     /* + 0..10: 0 %, 10 % ... 100 % */
+    ID_SENS = 220,                       /* + an index into k_sens */
 };
+static const int k_sens[] = { 25, 50, 75, 100, 125, 150, 200, 250, 300 };
+#define N_SENS ((int)(sizeof k_sens / sizeof k_sens[0]))
 #define WM_LOBBY_DONE (WM_APP + 1)
 #define WM_ROOMS_DONE (WM_APP + 2)
 #define WM_TOAST      (WM_APP + 4)
@@ -433,6 +513,25 @@ static HMENU make_menu(void) {
     AppendMenuA(mp, MF_SEPARATOR, 0, NULL);
     AppendMenuA(mp, MF_STRING, ID_LEAVE, "&Leave Server");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)mp, "&Multiplayer");
+    HMENU opt = CreatePopupMenu(), vol = CreatePopupMenu(), sens = CreatePopupMenu();
+    for (int i = 10; i >= 0; i--) {
+        char t[16];
+        if (i) snprintf(t, sizeof t, "%d%%", i * 10);
+        else snprintf(t, sizeof t, "Muted");
+        AppendMenuA(vol, MF_STRING, ID_VOLUME + i, t);
+    }
+    for (int i = 0; i < N_SENS; i++) {
+        char t[16];
+        snprintf(t, sizeof t, "%d%%%s", k_sens[i], k_sens[i] == 100 ? " (default)" : "");
+        AppendMenuA(sens, MF_STRING, ID_SENS + i, t);
+    }
+    AppendMenuA(opt, MF_POPUP, (UINT_PTR)vol, "&Volume\tF5 / F6");
+    AppendMenuA(opt, MF_POPUP, (UINT_PTR)sens, "Mouse camera &sensitivity");
+    AppendMenuA(opt, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(opt, MF_STRING, ID_MOUSE_LOOK, "&Mouse look\tF7");
+    AppendMenuA(opt, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(opt, MF_STRING, ID_WIDESCREEN, "&Widescreen (fill the window)");
+    AppendMenuA(bar, MF_POPUP, (UINT_PTR)opt, "&Options");
     HMENU help = CreatePopupMenu();
     AppendMenuA(help, MF_STRING, ID_ABOUT, "&About");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)help, "&Help");
@@ -446,11 +545,40 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_CREATE: if (!g_lobby_busy) ask_create(); break;
         case ID_JOIN:   if (!g_lobby_busy) ask_join(); break;
         case ID_LEAVE:  mhfu_lobby_leave(); update_title(); break;
+        case ID_MOUSE_LOOK: g_mlook_lock = !g_mlook_lock; mlook_update(h); break;
+        case ID_WIDESCREEN:
+            /* The picture fills the window at once; the camera widens from the next area on. */
+            mhfu_mod_set_widescreen(!mhfu_mod_widescreen());
+            option_save("widescreen", mhfu_mod_widescreen());
+            break;
+        default:
+            if (LOWORD(wp) >= ID_VOLUME && LOWORD(wp) <= ID_VOLUME + 10) {
+                mhfu_audio_set_volume((LOWORD(wp) - ID_VOLUME) * 10);
+                option_save("volume", mhfu_audio_volume());
+                g_volume_until = GetTickCount64() + 2000;
+                if (g_gl) gl_overlay_text(overlay_line());
+            } else if (LOWORD(wp) >= ID_SENS && LOWORD(wp) < ID_SENS + N_SENS) {
+                InterlockedExchange(&g_mouse_sens, k_sens[LOWORD(wp) - ID_SENS]);
+                option_save("mouse_sens", (int)g_mouse_sens);
+            }
+            break;
         case ID_ABOUT:
             MessageBoxA(h, MHFU_APP_NAME "\nVersion " MHFU_VERSION "\n\n" MHFU_ABOUT_TEXT, "About", MB_OK | MB_ICONINFORMATION);
             break;
         }
         return 0;
+    case WM_INITMENUPOPUP: {
+        /* The ticks: the volume and sensitivity now, mouse look on or off. */
+        HMENU m = (HMENU)wp;
+        const int vol = mhfu_audio_volume();
+        for (int i = 0; i <= 10; i++)
+            CheckMenuItem(m, ID_VOLUME + i, MF_BYCOMMAND | (vol == i * 10 ? MF_CHECKED : MF_UNCHECKED));
+        for (int i = 0; i < N_SENS; i++)
+            CheckMenuItem(m, ID_SENS + i, MF_BYCOMMAND | (mouse_sens() == k_sens[i] ? MF_CHECKED : MF_UNCHECKED));
+        CheckMenuItem(m, ID_MOUSE_LOOK, MF_BYCOMMAND | (g_mlook_lock ? MF_CHECKED : MF_UNCHECKED));
+        CheckMenuItem(m, ID_WIDESCREEN, MF_BYCOMMAND | (mhfu_mod_widescreen() ? MF_CHECKED : MF_UNCHECKED));
+        return 0;
+    }
     case WM_ASK_TEXT:
         if (!open_dialog("mhfu_text", text_proc, strncmp(g_text_prompt, "Chat", 4) ? "Keyboard" : "Chat", 324, 108))
             InterlockedExchange(&g_text_state, 3);   /* the box did not open */
@@ -481,6 +609,24 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (g_gl) gl_overlay_text(overlay_line());
             return 0;
         }
+        if (wp == VK_F5 || wp == VK_F6) {                     /* volume down / up, 10 % a press */
+            mhfu_audio_set_volume(mhfu_audio_volume() + (wp == VK_F6 ? 10 : -10));
+            option_save("volume", mhfu_audio_volume());
+            g_volume_until = GetTickCount64() + 2000;
+            if (g_gl) gl_overlay_text(overlay_line());
+            return 0;
+        }
+        if (wp == VK_F9 && !(lp & (1 << 30))) {                /* a memory dump (mods.c), for working out mods */
+            char path[1100];
+            const int r = mhfu_mods_dump(path, sizeof path);
+            mhfu_window_chat(NULL, r == 0 ? "Memory dump saved (work/memdump)" : "Memory dump failed", 1);
+            return 0;
+        }
+        if (wp == VK_F7 && !(lp & (1 << 30))) {                /* mouse look on / off */
+            g_mlook_lock = !g_mlook_lock;
+            mlook_update(h);
+            return 0;
+        }
         if (!(lp & (1 << 30)) && (wp == VK_F11 || (wp == VK_RETURN && msg == WM_SYSKEYDOWN))) {
             set_fullscreen(h, !g_fullscreen);
             return 0;
@@ -494,9 +640,30 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_SYSCHAR:
         return 0;                        /* no beep for Alt+Enter */
+    case WM_RBUTTONDOWN:
+        g_mlook_held = 1;
+        mlook_update(h);
+        return 0;
+    case WM_RBUTTONUP:
+        g_mlook_held = 0;
+        mlook_update(h);
+        return 0;
+    case WM_MOUSEMOVE:
+        if (g_mlook_on) {
+            POINT p;
+            GetCursorPos(&p);
+            if (p.x != g_mlook_at.x || p.y != g_mlook_at.y) {
+                InterlockedExchangeAdd(&g_mouse_dx, p.x - g_mlook_at.x);
+                InterlockedExchangeAdd(&g_mouse_dy, p.y - g_mlook_at.y);
+                SetCursorPos(g_mlook_at.x, g_mlook_at.y);
+            }
+        }
+        return 0;
     case WM_KILLFOCUS:
         InterlockedExchange(&g_buttons, 0);
         InterlockedExchange(&g_stick, 0);
+        g_mlook_held = g_mlook_lock = 0;           /* the text box, another window: the cursor comes back */
+        mlook_update(h);
         return 0;
     case WM_TOAST:
         SetTimer(h, 4, 16, NULL);
@@ -1018,11 +1185,47 @@ int mhfu_window_gl(void) {
     return 0;
 }
 
+/* The mouse's movement as d-pad, once a game frame: each axis holds its
+ * direction while pixels are left, and real time uses them up. At most half a
+ * second of turning waits, so a big flick does not spin on and on. */
+static uint32_t mouse_dpad(void) {
+    static long x, y;
+    static ULONGLONG last;
+    const int px_per_s = MOUSE_PX_PER_S * 100 / mouse_sens();
+    const ULONGLONG now = GetTickCount64();
+    const long ms = last ? (long)(now - last > 100 ? 100 : now - last) : 0;
+    last = now;
+    x += InterlockedExchange(&g_mouse_dx, 0);
+    y += InterlockedExchange(&g_mouse_dy, 0);
+    const long cap = px_per_s / 2;
+    if (x > cap) x = cap;
+    if (x < -cap) x = -cap;
+    if (y > cap) y = cap;
+    if (y < -cap) y = -cap;
+    uint32_t b = 0;
+    /* Up and down need a little more, so a sideways move does not tilt too. */
+    if (x > 2) b |= PSP_CTRL_RIGHT;
+    if (x < -2) b |= PSP_CTRL_LEFT;
+    if (y > 6) b |= PSP_CTRL_DOWN;
+    if (y < -6) b |= PSP_CTRL_UP;
+    const long use = ms * px_per_s / 1000 + 1;
+    x = x > use ? x - use : x < -use ? x + use : 0;
+    y = y > use ? y - use : y < -use ? y + use : 0;
+    return b;
+}
+
+void mhfu_window_size(int *w, int *h) {
+    RECT r = { 0, 0, 0, 0 };
+    if (g_main) GetClientRect(g_main, &r);
+    *w = r.right - r.left;
+    *h = r.bottom - r.top;
+}
+
 uint32_t mhfu_window_buttons(uint8_t *ax, uint8_t *ay) {
     LONG s = g_stick;
     *ax = (s & 1) ? 0 : (s & 2) ? 255 : 128;
     *ay = (s & 4) ? 0 : (s & 8) ? 255 : 128;
-    return (uint32_t)g_buttons;
+    return (uint32_t)g_buttons | mouse_dpad();
 }
 
 #elif !MHFU_SDL_WINDOW  /* neither window: stubs */
@@ -1032,6 +1235,7 @@ void mhfu_window_options(int fullscreen, int out_w, int out_h, const char *keys_
 }
 int mhfu_window_start(int scale) { (void)scale; return -1; }
 int mhfu_window_gl(void) { return -1; }
+void mhfu_window_size(int *w, int *h) { *w = *h = 0; }
 int mhfu_window_closed(void) { return 0; }
 void mhfu_window_on_close(void (*fn)(void)) { (void)fn; }
 uint32_t mhfu_window_buttons(uint8_t *ax, uint8_t *ay) { (void)ax; (void)ay; return 0; }

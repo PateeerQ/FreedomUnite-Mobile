@@ -22,6 +22,9 @@ int mhfu_window_start(int scale);
  * After mhfu_window_start. 0 on success; otherwise the renderer is unchanged. */
 int mhfu_window_gl(void);
 
+/* The window's drawing area in pixels (0 x 0 without a window). */
+void mhfu_window_size(int *w, int *h);
+
 /* Nonzero once the user has closed the window. */
 int mhfu_window_closed(void);
 
