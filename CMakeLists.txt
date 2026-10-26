@@ -127,12 +127,12 @@ if(ANDROID)
     # so the static libc++ (ANDROID_STL=c++_static) comes in.
     enable_language(CXX)
     add_library(mhfu_host SHARED host/main.c host/android.c host/achievements.c host/chat.c host/hle_mhfu.c host/input.c host/keys.c host/stats.c host/libfont.c host/utility.c
-               host/adhoc.c host/lobby.c host/audio.c host/atrac.c host/mpeg.c ${MHFU_GEN_SOURCES})
+               host/adhoc.c host/lobby.c host/mods.c host/audio.c host/atrac.c host/mpeg.c ${MHFU_GEN_SOURCES})
     set_target_properties(mhfu_host PROPERTIES OUTPUT_NAME main LINKER_LANGUAGE CXX)
     target_link_libraries(mhfu_host PRIVATE android log EGL GLESv3 OpenSLES)
 else()
     add_executable(mhfu_host host/main.c host/achievements.c host/chat.c host/hle_mhfu.c host/input.c host/keys.c host/stats.c host/libfont.c host/utility.c
-               host/adhoc.c host/lobby.c host/audio.c host/atrac.c host/mpeg.c ${MHFU_GEN_SOURCES})
+               host/adhoc.c host/lobby.c host/mods.c host/audio.c host/atrac.c host/mpeg.c ${MHFU_GEN_SOURCES})
 endif()
 target_include_directories(mhfu_host PRIVATE "${MHFU_GEN_DIR}" host)
 target_link_libraries(mhfu_host PRIVATE psprecomp mhfu_net)
