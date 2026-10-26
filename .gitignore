@@ -23,6 +23,8 @@ EBOOT.BIN
 *_EBOOT.BIN
 BOOT.BIN
 DATA.BIN
+# The PSP's fonts are Sony's: never in the repository or a release
+*.pgf
 *.ppm
 
 # PSP decryption keys are not distributed -- supply your own
