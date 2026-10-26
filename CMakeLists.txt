@@ -119,6 +119,12 @@ if(EXISTS "${MHFU_OVL_DIR}/overlays.c")
 else()
     set(MHFU_OVL_SOURCES host/overlays_none.c)
 endif()
+# The built-in mods' data (tools/mods_patch.py), or an empty table.
+if(EXISTS "${MHFU_OVL_DIR}/mods_builtin.c")
+    list(APPEND MHFU_OVL_SOURCES "${MHFU_OVL_DIR}/mods_builtin.c")
+else()
+    list(APPEND MHFU_OVL_SOURCES host/mods_none.c)
+endif()
 list(APPEND MHFU_GEN_SOURCES ${MHFU_OVL_SOURCES})
 
 if(ANDROID)
