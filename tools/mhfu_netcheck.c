@@ -38,11 +38,13 @@ static int host(const char *relay) {
     mhn_hub *hub = NULL;
     uint8_t mac[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
     if (relay) {
+        mhn_client_set_fps(60);                       /* the host could play at 60 ... */
         CHECK(mhn_client_start(relay, MHN_PORT, 1, NULL, mac, "Host", g_pass) == MHN_OK, "room created on the relay");
     } else {
         hub = mhn_hub_new(0, 1, 0);
         CHECK(hub && mhn_hub_make_room(hub, code, g_pass, "Host") == 0 && mhn_hub_start_thread(hub) == 0,
               "in-app hub up");
+        mhn_client_set_fps(60);
         CHECK(mhn_client_start("127.0.0.1", mhn_hub_port(hub), 0, code, mac, "Host", g_pass) == MHN_OK,
               "host in its own room");
     }
@@ -56,7 +58,7 @@ static int host(const char *relay) {
     int lis = mhn_ptp_listen(200, 4);
     CHECK(pdp > 0 && lis > 0, "sockets open");
 
-    int echoed = 0, accepted = 0, conn = 0, streamed = 0, chats = 0;
+    int echoed = 0, accepted = 0, conn = 0, streamed = 0, chats = 0, slowed = 0;
     uint64_t until = net_now_ms() + 30000, quiet_since = 0;
     /* Until the guest's chat lines have stopped coming for 2 s (a hub drops
      * all but MHN_CHAT_BURST of them). */
@@ -67,6 +69,7 @@ static int host(const char *relay) {
         char nick[MHN_NICK_LEN], line[MHN_CHAT_MAX + 1];
         int joined;
         while (mhn_chat_next(nick, sizeof nick, line, sizeof line, &joined)) {   /* every chat line, answered */
+            if (joined == 2 && !strcmp(line, "30") && !strcmp(nick, "Guest")) slowed = 1;
             if (joined) continue;                                             /* the guest coming in */
             char reply[MHN_CHAT_MAX + 1];
             snprintf(reply, sizeof reply, "re: %s", line);
@@ -93,6 +96,7 @@ static int host(const char *relay) {
     CHECK(echoed >= 2, "echoed the guest's datagrams");
     CHECK(accepted, "accepted and echoed a PTP connection");
     CHECK(chats == MHN_CHAT_BURST, "the guest's chat lines came, all but the ones over the limit");
+    CHECK(slowed, "the room went to 30 fps with the guest, its slowest player");
     net_sleep_ms(1500);   /* let the guest read the echo before the room closes */
     mhn_ptp_close(conn);
     mhn_client_stop();
@@ -119,7 +123,10 @@ static int join(const char *code, const char *relay) {
         CHECK(mhn_client_start(host, port, 0, code, mac, "Guest", "0000") == MHN_BAD_PASSCODE,
               "a wrong passcode is refused");
 
+    mhn_client_set_fps(30);                           /* ... the guest only at 30 */
     CHECK(mhn_client_start(host, port, 0, code, mac, "Guest", g_pass) == MHN_OK, "joined the room");
+    for (int i = 0; i < 100 && mhn_client_room_fps() != 30; i++) net_sleep_ms(10);
+    CHECK(mhn_client_room_fps() == 30, "the room plays at 30 fps, the slowest player's");
 
     mhn_ctl_scan();
     CHECK(wait_event(MHN_EV_SCAN, 3000) == 0, "scan finished");
