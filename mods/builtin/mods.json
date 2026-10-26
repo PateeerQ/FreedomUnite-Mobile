@@ -7,19 +7,6 @@
   "base": 165803520,
   "size": 6656,
   "entries": [
-   60279808,
-   60282688,
-   60282704,
-   60282720,
-   60282736,
-   60282752,
-   60282768,
-   60282784,
-   60282816,
-   60309120,
-   92000400,
-   131099180,
-   131099760,
    165803520,
    165803904
   ],
@@ -30,7 +17,8 @@
     "orig": 2388918772,
     "word": 175668608,
     "kind": "j",
-    "target": 165803520
+    "target": 165803520,
+    "mnemonic": "lw"
    },
    {
     "addr": 143037456,
@@ -38,7 +26,8 @@
     "orig": 2758028410,
     "word": 175668704,
     "kind": "j",
-    "target": 165803904
+    "target": 165803904,
+    "mnemonic": "sh"
    }
   ],
   "returns": [
@@ -48,7 +37,8 @@
   "notes": [
    "0891F9FC: through the game's register, EU offset -0x23d6",
    "0891FED8: the hooked instruction, EU form"
-  ]
+  ],
+  "overlay": "942ABBEB"
  },
  {
   "id": "damage",
@@ -70,7 +60,8 @@
     "orig": 237017523,
     "word": 175686104,
     "kind": "j",
-    "target": 165873504
+    "target": 165873504,
+    "mnemonic": "jal"
    },
    {
     "addr": 143037468,
@@ -78,30 +69,34 @@
     "orig": 65011720,
     "word": 175686316,
     "kind": "j",
-    "target": 165874352
+    "target": 165874352,
+    "mnemonic": "jr"
    },
    {
     "addr": 163858396,
     "unit": "game_sub",
-    "orig": null,
+    "orig": 604176385,
     "word": 604176392,
-    "kind": "word"
+    "kind": "word",
+    "mnemonic": "addiu"
    },
    {
     "addr": 162298324,
     "unit": "game_task",
-    "orig": null,
+    "orig": 2795635428,
     "word": 175686008,
     "kind": "j",
-    "target": 165873120
+    "target": 165873120,
+    "mnemonic": "sh"
    },
    {
     "addr": 162957652,
     "unit": "game_task",
-    "orig": null,
+    "orig": 604110854,
     "word": 175686057,
     "kind": "j",
-    "target": 165873316
+    "target": 165873316,
+    "mnemonic": "addiu"
    }
   ],
   "returns": [
@@ -110,7 +105,8 @@
    162298328,
    162957656
   ],
-  "notes": []
+  "notes": [],
+  "overlay": "3640D0AA"
  },
  {
   "id": "gathering",
@@ -120,10 +116,6 @@
   "base": 165941520,
   "size": 1756,
   "entries": [
-   60441088,
-   60441216,
-   60441344,
-   60441472,
    165941520
   ],
   "hooks": [
@@ -133,14 +125,18 @@
     "orig": 1006766228,
     "word": 175703108,
     "kind": "j",
-    "target": 165941520
+    "target": 165941520,
+    "mnemonic": "lui",
+    "delay": 0
    },
    {
     "addr": 142892264,
     "unit": "eboot",
     "orig": 2487596648,
     "word": 0,
-    "kind": "word"
+    "kind": "word",
+    "mnemonic": "lhu",
+    "companion": true
    }
   ],
   "returns": [
@@ -148,6 +144,7 @@
   ],
   "notes": [
    "089215E0: the hooked instruction, EU form"
-  ]
+  ],
+  "overlay": "7267DB36"
  }
 ]
