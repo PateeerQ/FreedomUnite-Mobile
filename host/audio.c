@@ -115,6 +115,20 @@ void mhfu_audio_chime(void) {
     g_chime_pos = 0;
 }
 
+static volatile int g_volume = -1;        /* percent; -1: MHFU_VOLUME not read yet */
+
+int mhfu_audio_volume(void) {
+    if (g_volume < 0) {
+        const char *e = getenv("MHFU_VOLUME");
+        mhfu_audio_set_volume(e && *e ? atoi(e) : 100);
+    }
+    return g_volume;
+}
+
+void mhfu_audio_set_volume(int percent) {
+    g_volume = percent < 0 ? 0 : percent > 100 ? 100 : percent;
+}
+
 static void mix(int16_t *out, uint32_t frames) {
     static int32_t acc[2 * 2048];
     memset(acc, 0, (size_t)frames * 2 * sizeof acc[0]);
@@ -139,6 +153,9 @@ static void mix(int16_t *out, uint32_t frames) {
         acc[2 * i] += g_chime[2 * g_chime_pos];
         acc[2 * i + 1] += g_chime[2 * g_chime_pos + 1];
     }
+    const int vol = mhfu_audio_volume();
+    if (vol != 100)
+        for (uint32_t i = 0; i < frames * 2; i++) acc[i] = acc[i] * vol / 100;
     for (uint32_t i = 0; i < frames * 2; i++)
         out[i] = (int16_t)(acc[i] > 32767 ? 32767 : acc[i] < -32768 ? -32768 : acc[i]);
 }

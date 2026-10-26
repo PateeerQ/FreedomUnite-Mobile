@@ -28,5 +28,9 @@ void mhfu_audio_mark(uint64_t decoded_us);
 
 /* Plays the achievement chime over the game's sound. Any thread. */
 void mhfu_audio_chime(void);
+/* The master volume, 0-100 % of the game's own (MHFU_VOLUME, the launcher's
+ * slider; F5/F6 in the Win32 window). */
+int  mhfu_audio_volume(void);
+void mhfu_audio_set_volume(int percent);
 
 #endif
