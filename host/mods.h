@@ -20,6 +20,19 @@ void mhfu_mod_set_widescreen(int on);
 /* Called by the patched camera code: the aspect as float bits. */
 unsigned mhfu_mod_aspect(unsigned original);
 
+/* The built-in code mods (mods/builtin, host/mods_builtin.h): their memory
+ * reserved and filled, their recompiled code registered, each switched on or
+ * off as MHFU_MODS says ("damage=0,gathering=1"; a mod not named is as its
+ * default, on). After the EBOOT is in memory, before the game runs. */
+void mhfu_mods_boot(void);
+int  mhfu_mod_count(void);
+const char *mhfu_mod_id(int i);
+const char *mhfu_mod_name(int i);
+const char *mhfu_mod_description(int i);
+int  mhfu_mod_on(int i);
+/* On or off at any time (from the window's thread too). */
+void mhfu_mod_set(int i, int on);
+
 /* Reads <root>/cheats/ULES01213.ini. */
 void mhfu_cheats_init(const char *root);
 /* Once a game frame, with the buttons held (for the joker codes). */

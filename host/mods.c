@@ -1,7 +1,10 @@
 /* MHFU-Android -- see mods.h. The cheat engine follows PPSSPP's CWCheat one
  * (Core/CwCheat.cpp): the same code types and the same meaning. */
 #include "mods.h"
+#include "mods_builtin.h"
+#include "overlays.h"
 
+#include "psprecomp/hle.h"
 #include "psprecomp/mem.h"
 #include "psprecomp/render.h"
 #include "net/client.h"
@@ -44,6 +47,76 @@ unsigned mhfu_mod_aspect(unsigned original) {
     union { float f; unsigned u; } a;
     a.f = (float)w / (float)h;
     return a.u;
+}
+
+/* ---- the built-in code mods ---- */
+
+static volatile int g_mod_on[16];
+static int g_mod_ok[16];                     /* loaded: its memory, its code and its hooks as expected */
+
+int mhfu_mod_count(void) { return mhfu_nbuiltin_mods < 16 ? mhfu_nbuiltin_mods : 16; }
+const char *mhfu_mod_id(int i) { return mhfu_builtin_mods[i].id; }
+const char *mhfu_mod_name(int i) { return mhfu_builtin_mods[i].name; }
+const char *mhfu_mod_description(int i) { return mhfu_builtin_mods[i].description; }
+int mhfu_mod_on(int i) { return i >= 0 && i < mhfu_mod_count() && g_mod_on[i]; }
+
+/* Its hooks in (the EBOOT's: the overlays' the mod writes itself) or out. */
+static void apply(int i, int on) {
+    const mhfu_builtin_mod *m = &mhfu_builtin_mods[i];
+    for (int k = 0; k < m->nhooks; k++) {
+        const mhfu_mod_hook *h = &m->hooks[k];
+        if (h->eboot) psp_write32(h->addr, on ? h->word : h->orig);
+        else if (!on && psp_read32(h->addr) == h->word) psp_write32(h->addr, h->orig);
+    }
+}
+
+void mhfu_mod_set(int i, int on) {
+    if (i < 0 || i >= mhfu_mod_count() || !g_mod_ok[i]) return;
+    on = on != 0;
+    if (g_mod_on[i] == on) return;
+    g_mod_on[i] = on;
+    apply(i, on);
+    printf("mods: %s %s\n", mhfu_builtin_mods[i].name, on ? "on" : "off");
+    fflush(stdout);
+}
+
+/* "damage=0,gathering=1": what MHFU_MODS says of this mod, or -1. */
+static int setting(const char *id) {
+    const char *e = getenv("MHFU_MODS");
+    const size_t n = strlen(id);
+    for (const char *p = e; p && *p; p = strchr(p, ',') ? strchr(p, ',') + 1 : NULL)
+        if (!strncmp(p, id, n) && p[n] == '=') return atoi(p + n + 1) != 0;
+    return -1;
+}
+
+void mhfu_mods_boot(void) {
+    if (!mhfu_nbuiltin_mods) return;
+    if (!psp_sysmem_reserve(MHFU_MODS_LO, MHFU_MODS_HI - MHFU_MODS_LO, "built-in mods")) {
+        printf("mods: 0x%08X-0x%08X is not free: built-in mods off\n", MHFU_MODS_LO, MHFU_MODS_HI);
+        return;
+    }
+    for (int i = 0; i < mhfu_mod_count(); i++) {
+        const mhfu_builtin_mod *m = &mhfu_builtin_mods[i];
+        /* Its code must be recompiled in, and the game where its hooks go as expected. */
+        const mhfu_overlay *o = NULL;
+        for (int k = 0; k < mhfu_noverlays; k++)
+            if (mhfu_overlays[k].hash == m->overlay) o = &mhfu_overlays[k];
+        int ok = o != NULL;
+        for (int k = 0; ok && k < m->nhooks; k++)
+            if (m->hooks[k].eboot && psp_read32(m->hooks[k].addr) != m->hooks[k].orig) ok = 0;
+        if (!ok) {
+            printf("mods: %s: %s, left out\n", m->name, o ? "the game's code is not as expected" : "its code is not recompiled (run setup)");
+            continue;
+        }
+        for (uint32_t k = 0; k < m->nwords; k++) psp_write32(m->base + 4 * k, m->words[k]);
+        o->reg();
+        g_mod_ok[i] = 1;
+        const int want = setting(m->id);
+        g_mod_on[i] = want < 0 ? m->on_by_default : want;
+        if (g_mod_on[i]) apply(i, 1);
+        printf("mods: %s %s\n", m->name, g_mod_on[i] ? "on" : "off");
+    }
+    fflush(stdout);
 }
 
 /* ---- cheats ---- */
