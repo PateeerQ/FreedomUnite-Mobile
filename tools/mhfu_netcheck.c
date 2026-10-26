@@ -119,6 +119,9 @@ static int join(const char *code, const char *relay) {
     for (int i = 0; i < listed; i++) if (!strcmp(rooms[i].code, code)) seen = i;
     CHECK(seen >= 0 && rooms[seen].players == 1 && rooms[seen].locked == (g_pass[0] != 0),
           "the room is in the list, one player, locked as it should be");
+    CHECK((rooms[seen].fps == 30 || rooms[seen].fps == 60) && rooms[seen].ping_ms >= 0,
+          "the list says the room's frame rate and the ping");
+    printf("     (%d fps, %d ms)\n", rooms[seen].fps, rooms[seen].ping_ms);
     if (g_pass[0])
         CHECK(mhn_client_start(host, port, 0, code, mac, "Guest", "0000") == MHN_BAD_PASSCODE,
               "a wrong passcode is refused");
