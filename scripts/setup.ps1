@@ -236,6 +236,8 @@ New-Item -ItemType Directory -Force $gen | Out-Null
 if ($LASTEXITCODE) { throw "allegrexrecomp emit failed" }
 # The 60 fps mode, behind a switch (tools/fps60_patch.py).
 python (Join-Path $repo "tools\fps60_patch.py") $gen $ovlGen
+# Built-in mods (widescreen), behind switches (tools/mods_patch.py).
+python (Join-Path $repo "tools\mods_patch.py") $gen
 if ($LASTEXITCODE) { throw "the 60 fps patch did not apply" }
 
 # --- 5. the host --------------------------------------------------------------

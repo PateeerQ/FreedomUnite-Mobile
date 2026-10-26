@@ -45,6 +45,8 @@ param(
     [string]$Press,
     # Save every Nth frame to work\root\frames.
     [int]$Snap = 0,
+    # The window's size, "1280x544" (as the launcher's Output): for widescreen.
+    [string]$Size,
     # What the on-screen keyboard types: the character name.
     [string]$Name,
     # Diagnostics: switch the depth buffer off / restore the old VFPU behaviour
@@ -115,6 +117,7 @@ if ($Iso) {
 if ($Window -and -not $PSBoundParameters.ContainsKey('Seconds')) { $Seconds = 3600 }
 $extra = ""
 if ($Window) { $extra += " --window $Scale" }
+if ($Size)   { $extra += " --size $Size" }
 if ($Press)  { $extra += " --press `"$Press`"" }
 if ($Name)   { $extra += " --name `"$Name`"" }
 if ($NetCreate) { $extra += " --net-create" }
