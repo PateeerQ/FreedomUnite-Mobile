@@ -1,0 +1,3 @@
+# Gathering Node Indicators (built-in mod, tools/mods_convert.py): where the game's hooks jump.
+# hook targets
+09E41110

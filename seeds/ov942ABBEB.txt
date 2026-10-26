@@ -1,0 +1,4 @@
+# Target Camera + Crosshair (built-in mod, tools/mods_convert.py): where the game's hooks jump.
+# hook targets
+09E1F600
+09E1F780

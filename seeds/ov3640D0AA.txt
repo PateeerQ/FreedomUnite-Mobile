@@ -1,0 +1,6 @@
+# Damage Numbers (built-in mod, tools/mods_convert.py): where the game's hooks jump.
+# hook targets
+09E305E0
+09E306A4
+09E30760
+09E30AB0

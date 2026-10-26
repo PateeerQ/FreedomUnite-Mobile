@@ -1,3 +1,6 @@
 # game_task.ovl (C5DF3522), slot 1.
 # Functions only reached through a pointer built at run time (dispatch misses).
 09B6A028
+# where the built-in mod Damage Numbers jumps back (tools/mods_convert.py)
+09AC79D8
+09B68958

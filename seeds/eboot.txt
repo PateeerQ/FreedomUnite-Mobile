@@ -17,3 +17,11 @@
 088C3180
 088EFF88
 088AC0E8
+# where the built-in mod Target Camera + Crosshair jumps back (tools/mods_convert.py)
+08869414
+088874F8
+# where the built-in mod Damage Numbers jumps back (tools/mods_convert.py)
+08841DBC
+0889134C
+# where the built-in mod Gathering Node Indicators jumps back (tools/mods_convert.py)
+08845CEC
