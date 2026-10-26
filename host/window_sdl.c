@@ -314,6 +314,8 @@ static int vpad_visible(void) {
 static int g_res_setting;
 static int g_fps60;                  /* the 60 fps mode (mhfu_fps_set_preferred) */
 static int g_wide;                   /* the widescreen mod (mhfu_mod_set_widescreen) */
+static int g_mod_set[16] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
+                                     /* the built-in mods as settings.ini has them: -1 not there */
 
 static char g_settings_path[1024];
 static void settings_load(void) {
@@ -333,6 +335,10 @@ static void settings_load(void) {
         if (sscanf(line, "resolution=%d", &v) == 1 && v >= 1 && v <= 4) g_res_setting = v;
         if (sscanf(line, "fps60=%d", &v) == 1) g_fps60 = v != 0;
         if (sscanf(line, "widescreen=%d", &v) == 1) g_wide = v != 0;
+        char id[32];
+        if (sscanf(line, "mod_%31[a-z0-9]=%d", id, &v) == 2)
+            for (int i = 0; i < mhfu_mod_count(); i++)
+                if (!strcmp(id, mhfu_mod_id(i))) g_mod_set[i] = v != 0;
         if (sscanf(line, "layout_%31[a-z]=%f,%f,%f", name, &x, &y, &k) == 4)
             for (int g = 0; g < G_COUNT; g++)
                 if (!strcmp(name, k_group_name[g])) g_place[g] = (placed){ 1, x, y, k };
@@ -346,6 +352,7 @@ static void settings_save(void) {
             g_vpad_mode, g_show_fps_init, g_vpad_alpha);
     if (g_res_setting) fprintf(f, "resolution=%d\n", g_res_setting);
     fprintf(f, "fps60=%d\nwidescreen=%d\n", g_fps60, g_wide);
+    for (int i = 0; i < mhfu_mod_count(); i++) fprintf(f, "mod_%s=%d\n", mhfu_mod_id(i), mhfu_mod_on(i));
     for (int g = 0; g < G_COUNT; g++)
         if (g_place[g].set)
             fprintf(f, "layout_%s=%.4f,%.4f,%.3f\n", k_group_name[g], g_place[g].cx, g_place[g].cy, g_place[g].k);
@@ -715,7 +722,7 @@ static void draw_editor(canvas *c, float s) {
  * Android dialogs (MhfuActivity, over JNI): they need text fields. */
 
 enum { R_HEAD, R_ITEM };
-enum { M_RESUME, M_NET, M_ACH, M_VPAD, M_EDIT, M_OPACITY, M_FPS, M_RES, M_SMOOTH, M_WIDE, M_CHEATS, M_SAVES, M_FILES, M_CRASH, M_UPDATE, M_ABOUT, M_EXIT };
+enum { M_RESUME, M_NET, M_ACH, M_VPAD, M_EDIT, M_OPACITY, M_FPS, M_RES, M_SMOOTH, M_WIDE, M_CHEATS, M_MOD0, M_MOD1, M_MOD2, M_SAVES, M_FILES, M_CRASH, M_UPDATE, M_ABOUT, M_EXIT };
 typedef struct { int kind, id; const char *text; } menu_row;
 static const menu_row k_menu[] = {
     { R_HEAD, -1, "GAME" },     { R_ITEM, M_RESUME, "Back to game" },
@@ -727,6 +734,8 @@ static const menu_row k_menu[] = {
     { R_HEAD, -1, "DISPLAY" },  { R_ITEM, M_RES, "Resolution" }, { R_ITEM, M_SMOOTH, "60 FPS (beta)" },
     { R_ITEM, M_FPS, "Show FPS" },
     { R_HEAD, -1, "MODS" },     { R_ITEM, M_WIDE, "Widescreen" },
+    /* the built-in mods (mods.c), in mhfu_builtin_mods' order */
+    { R_ITEM, M_MOD0, "Target Camera" }, { R_ITEM, M_MOD1, "Damage Numbers" }, { R_ITEM, M_MOD2, "Gathering Nodes" },
 #ifdef __ANDROID__
     { R_ITEM, M_CHEATS, "Cheats" },
 #endif
@@ -789,6 +798,8 @@ static const char *menu_value(int id) {
     case M_FPS: return g_show_fps ? "On" : "Off";
     case M_SMOOTH: return !g_fps60 ? "Off" : mhfu_fps_target() >= 60 ? "On" : "On (room at 30)";
     case M_WIDE: return mhfu_mod_widescreen() ? "On" : "Off";
+    case M_MOD0: case M_MOD1: case M_MOD2:
+        return id - M_MOD0 >= mhfu_mod_count() ? "Not built in" : mhfu_mod_on(id - M_MOD0) ? "On" : "Off";
     case M_CHEATS: {
         static char v[24];
         if (!mhfu_cheats_active()) return "Off";
@@ -910,6 +921,10 @@ static void menu_tap(float px, float py, float w, float h) {
             case M_FPS: g_show_fps = !g_show_fps; g_show_fps_init = g_show_fps; settings_save(); break;
             case M_SMOOTH: g_fps60 = !g_fps60; mhfu_fps_set_preferred(g_fps60 ? 60 : 30); settings_save(); break;
             case M_WIDE: g_wide = !mhfu_mod_widescreen(); mhfu_mod_set_widescreen(g_wide); settings_save(); break;
+            case M_MOD0: case M_MOD1: case M_MOD2:
+                mhfu_mod_set(r->id - M_MOD0, !mhfu_mod_on(r->id - M_MOD0));
+                settings_save();
+                break;
             case M_RES: g_res_setting = (g_res_setting ? g_res_setting : g_scale) % 4 + 1; settings_save(); break;
             case M_EDIT: menu_set(0); edit_open(); break;
 #ifdef __ANDROID__
@@ -1371,6 +1386,8 @@ int mhfu_window_gl(void) {
     g_gl = 1;
     if (g_fps60) mhfu_fps_set_preferred(60);
     if (g_wide) mhfu_mod_set_widescreen(1);
+    for (int i = 0; i < mhfu_mod_count(); i++)
+        if (g_mod_set[i] >= 0) mhfu_mod_set(i, g_mod_set[i]);
     wake(g_ev_wake);
     return 0;
 }
