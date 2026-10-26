@@ -173,6 +173,10 @@ if (-not $ovlTool) { throw "mhfu_ovl.exe not found under $build" }
 
 $seen = @{}
 $table = @()
+# The built-in code mods (tools/mods_convert.py) are recompiled the same way.
+foreach ($mod in Get-ChildItem (Join-Path $repo "mods\builtin") -Filter *.bin -ErrorAction SilentlyContinue) {
+    Copy-Item -Force $mod.FullName (Join-Path $ovlSrc ("mod_" + $mod.Name))
+}
 foreach ($bin in Get-ChildItem $ovlSrc -Filter *.bin | Sort-Object Name) {
     $elf = Join-Path $ovlGen ($bin.BaseName + ".elf")
     $ErrorActionPreference = 'Continue'
@@ -236,9 +240,11 @@ New-Item -ItemType Directory -Force $gen | Out-Null
 if ($LASTEXITCODE) { throw "allegrexrecomp emit failed" }
 # The 60 fps mode, behind a switch (tools/fps60_patch.py).
 python (Join-Path $repo "tools\fps60_patch.py") $gen $ovlGen
-# Built-in mods (widescreen), behind switches (tools/mods_patch.py).
-python (Join-Path $repo "tools\mods_patch.py") $gen
 if ($LASTEXITCODE) { throw "the 60 fps patch did not apply" }
+# Built-in mods (widescreen, mods\builtin), behind switches (tools/mods_patch.py);
+# it also writes their data, gen_ovl\mods_builtin.c.
+python (Join-Path $repo "tools\mods_patch.py") $gen $ovlGen
+if ($LASTEXITCODE) { throw "the mods patch did not apply" }
 
 # --- 5. the host --------------------------------------------------------------
 

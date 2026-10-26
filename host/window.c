@@ -214,6 +214,7 @@ enum {
     ID_WHERE_NET, ID_WHERE_LAN, ID_MOUSE_LOOK, ID_WIDESCREEN,
     ID_VOLUME = 200,                     /* + 0..10: 0 %, 10 % ... 100 % */
     ID_SENS = 220,                       /* + an index into k_sens */
+    ID_MOD = 240,                        /* + a built-in mod's index (mods.c) */
 };
 static const int k_sens[] = { 25, 50, 75, 100, 125, 150, 200, 250, 300 };
 #define N_SENS ((int)(sizeof k_sens / sizeof k_sens[0]))
@@ -531,6 +532,11 @@ static HMENU make_menu(void) {
     AppendMenuA(opt, MF_STRING, ID_MOUSE_LOOK, "&Mouse look\tF7");
     AppendMenuA(opt, MF_SEPARATOR, 0, NULL);
     AppendMenuA(opt, MF_STRING, ID_WIDESCREEN, "&Widescreen (fill the window)");
+    if (mhfu_mod_count()) {
+        HMENU mods = CreatePopupMenu();
+        for (int i = 0; i < mhfu_mod_count(); i++) AppendMenuA(mods, MF_STRING, ID_MOD + i, mhfu_mod_name(i));
+        AppendMenuA(opt, MF_POPUP, (UINT_PTR)mods, "M&ods");
+    }
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)opt, "&Options");
     HMENU help = CreatePopupMenu();
     AppendMenuA(help, MF_STRING, ID_ABOUT, "&About");
@@ -557,6 +563,12 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 option_save("volume", mhfu_audio_volume());
                 g_volume_until = GetTickCount64() + 2000;
                 if (g_gl) gl_overlay_text(overlay_line());
+            } else if (LOWORD(wp) >= ID_MOD && LOWORD(wp) < ID_MOD + mhfu_mod_count()) {
+                const int i = LOWORD(wp) - ID_MOD;
+                char key[64];
+                mhfu_mod_set(i, !mhfu_mod_on(i));
+                snprintf(key, sizeof key, "mod_%s", mhfu_mod_id(i));
+                option_save(key, mhfu_mod_on(i));
             } else if (LOWORD(wp) >= ID_SENS && LOWORD(wp) < ID_SENS + N_SENS) {
                 InterlockedExchange(&g_mouse_sens, k_sens[LOWORD(wp) - ID_SENS]);
                 option_save("mouse_sens", (int)g_mouse_sens);
@@ -577,6 +589,8 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             CheckMenuItem(m, ID_SENS + i, MF_BYCOMMAND | (mouse_sens() == k_sens[i] ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(m, ID_MOUSE_LOOK, MF_BYCOMMAND | (g_mlook_lock ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(m, ID_WIDESCREEN, MF_BYCOMMAND | (mhfu_mod_widescreen() ? MF_CHECKED : MF_UNCHECKED));
+        for (int i = 0; i < mhfu_mod_count(); i++)
+            CheckMenuItem(m, ID_MOD + i, MF_BYCOMMAND | (mhfu_mod_on(i) ? MF_CHECKED : MF_UNCHECKED));
         return 0;
     }
     case WM_ASK_TEXT:
