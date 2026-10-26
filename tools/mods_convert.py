@@ -164,8 +164,9 @@ def convert(folder, mid, name, desc, delta):
         w = w32(a)
         if w >> 16 == 0x3C09 and w32(a + 4) >> 16 == 0x2529:
             word = (((w & 0xFFFF) << 16) + sext(w32(a + 4) & 0xFFFF)) & 0xFFFFFFFF
-            if word >> 26 == 2:
-                entries.add(((a + 4) & 0xF0000000) | ((word & 0x03FFFFFF) << 2))
+            t = ((a + 4) & 0xF0000000) | ((word & 0x03FFFFFF) << 2)
+            if word >> 26 == 2 and OWN_LO <= t < OWN_HI:
+                entries.add(t)
     code = set()
     todo = sorted(entries)
     while todo:
@@ -344,12 +345,60 @@ def convert(folder, mid, name, desc, delta):
     }, words
 
 
+def overlay_word(unit, a):
+    """The EU word at `a` in the named overlay (work/overlays, as the host saved it)."""
+    for f in sorted(glob.glob(os.path.join(REPO, "work", "overlays", "*.bin"))):
+        d = open(f, "rb").read()
+        if d[:4] != b"MWo3" or not d[0x20:0x40].startswith(unit.encode() + b".ovl"):
+            continue
+        base, code = struct.unpack_from("<II", d, 8)
+        if base <= a < base + 0x40 + code:            # the header loads too: code at base + 0x40
+            return struct.unpack_from("<I", d, a - base)[0]
+    raise ValueError(f"{a:08X}: no {unit} overlay in work/overlays")
+
+
+def mnemonic(w, a):
+    from capstone import Cs, CS_ARCH_MIPS, CS_MODE_MIPS32, CS_MODE_LITTLE_ENDIAN
+    md = Cs(CS_ARCH_MIPS, CS_MODE_MIPS32 + CS_MODE_LITTLE_ENDIAN)
+    i = next(md.disasm(struct.pack("<I", w), a), None)
+    return i.mnemonic if i else "?"
+
+
+def fnv1a(b):
+    h = 2166136261
+    for x in b:
+        h = ((h ^ x) * 16777619) & 0xFFFFFFFF
+    return h
+
+
+def add_seeds(path, header, addrs, why):
+    """Addresses into a seeds file, once each."""
+    have = set()
+    if os.path.exists(path):
+        for l in open(path):
+            l = l.split("#")[0].strip()
+            if l:
+                have.add(int(l, 16))
+    new = [a for a in sorted(set(addrs)) if a not in have]
+    if not new:
+        return
+    fresh = not os.path.exists(path)
+    with open(path, "a", newline="\n") as f:
+        if fresh:
+            f.write(header)
+        f.write(f"# {why}\n")
+        for a in new:
+            f.write(f"{a:08X}\n")
+
+
 def write_ovl(path, mid, base, words):
-    """An "MWo3" overlay: 0x40-byte header, then the code (and data, as code)."""
+    """An "MWo3" overlay: 0x40-byte header, then the code (and data, as code).
+    The header loads too, so its load address is 0x40 before the code."""
     body = b"".join(struct.pack("<I", w) for _, w in words)
     name = f"mhfu_mod_{mid}.ovl".encode()
-    hdr = struct.pack("<4sIIIIIII", b"MWo3", 0x4D4F44, base, len(body), 0, 0, 0, 0) + name.ljust(32, b"\0")[:32]
+    hdr = struct.pack("<4sIIIIIII", b"MWo3", 0x4D4F44, base - 0x40, len(body), 0, 0, 0, 0) + name.ljust(32, b"\0")[:32]
     open(path, "wb").write(hdr + body)
+    return fnv1a(hdr + body)
 
 
 def main():
@@ -367,7 +416,28 @@ def main():
             print(f"mods: no folder for {name} under {src}")
             continue
         m, words = convert(folder[0], mid, name, desc, delta)
-        write_ovl(os.path.join(outdir, mid + ".bin"), mid, m["base"], words)
+        h = write_ovl(os.path.join(outdir, mid + ".bin"), mid, m["base"], words)
+        m["overlay"] = f"{h:08X}"
+        # the original EU words at the hooks (to take a mod out again), and what they are
+        for k in m["hooks"]:
+            if k["unit"] != "eboot":
+                k["orig"] = overlay_word(k["unit"], k["addr"])
+            k["mnemonic"] = mnemonic(k["orig"], k["addr"])
+        # a hook that also replaced the delay slot (with a nop) belongs to the `j` before it
+        addrs = {k["addr"]: k for k in m["hooks"]}
+        for k in m["hooks"]:
+            if k["kind"] == "word" and k["unit"] == "eboot" and addrs.get(k["addr"] - 4, {}).get("kind") == "j":
+                addrs[k["addr"] - 4]["delay"] = k["word"]
+                k["companion"] = True
+        # seeds: the mod's entry points, and where it jumps back into the game
+        add_seeds(os.path.join(REPO, "seeds", f"ov{h:08X}.txt"),
+                  f"# {name} (built-in mod, tools/mods_convert.py): where the game's hooks jump.\n",
+                  m["entries"], "hook targets")
+        add_seeds(os.path.join(REPO, "seeds", "eboot.txt"), "", [r for r in m["returns"] if r < 0x08A00000],
+                  f"where the built-in mod {name} jumps back (tools/mods_convert.py)")
+        add_seeds(os.path.join(REPO, "seeds", "ovC5DF3522.txt"), "",
+                  [r for r in m["returns"] if 0x09A5F200 <= r < 0x09C19000],
+                  f"where the built-in mod {name} jumps back (tools/mods_convert.py)")
         meta.append(m)
         print(f"mods: {name}: {len(words)} words at {m['base']:08X}, {len(m['hooks'])} hook(s), "
               f"{len(m['returns'])} return(s)")
