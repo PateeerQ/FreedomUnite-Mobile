@@ -157,6 +157,8 @@ bool config_load(Config &c) {
         else if (k == "fps60") b(c.fps60);
         else if (k == "volume") c.volume = std::clamp(atoi(v.c_str()), 0, 100);
         else if (k == "mouse_sens") c.mouse_sens = std::clamp(atoi(v.c_str()), 25, 300);
+        else if (k == "widescreen") b(c.widescreen);
+        else if (k.rfind("mod_", 0) == 0) c.mods[k.substr(4)] = v == "1" || v == "true";
         else if (k == "nick") c.nick = v;
         else if (k == "gamepad") c.gamepad = v;
         else if (k == "gamepad_name") c.gamepad_name = v;
@@ -184,6 +186,8 @@ bool config_save(const Config &c) {
     o << "fps60=" << (c.fps60 ? 1 : 0) << "\n";
     o << "volume=" << c.volume << "\n";
     o << "mouse_sens=" << c.mouse_sens << "\n";
+    o << "widescreen=" << (c.widescreen ? 1 : 0) << "\n";
+    for (auto &m : c.mods) o << "mod_" << m.first << "=" << (m.second ? 1 : 0) << "\n";
     o << "nick=" << escape(c.nick) << "\n";
     o << "check_updates=" << (c.check_updates ? 1 : 0) << "\n";
     o << "close_on_start=" << (c.close_on_start ? 1 : 0) << "\n";
