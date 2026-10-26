@@ -234,6 +234,9 @@ if (Test-Path $gen) { Remove-Item -Recurse -Force $gen }
 New-Item -ItemType Directory -Force $gen | Out-Null
 & $tool emit $localEboot $gen mhfu --seeds $mainSeeds
 if ($LASTEXITCODE) { throw "allegrexrecomp emit failed" }
+# The 60 fps mode, behind a switch (tools/fps60_patch.py).
+python (Join-Path $repo "tools\fps60_patch.py") $gen $ovlGen
+if ($LASTEXITCODE) { throw "the 60 fps patch did not apply" }
 
 # --- 5. the host --------------------------------------------------------------
 
