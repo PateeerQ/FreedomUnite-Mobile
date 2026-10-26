@@ -8,6 +8,7 @@
 
 #include "psprecomp/mem.h"
 #include "audio.h"
+#include "mods.h"
 #include "window.h"
 
 #include "rc_client.h"
@@ -456,6 +457,13 @@ void mhfu_ach_frame(void) {
         show("ACHIEVEMENT UNLOCKED  \xC2\xB7  10 pts", "Welcome to Pokke Village",
              "A test of the unlock toast: this is how an earned achievement is shown.", NULL, NULL, 1);
     if (!g_rc) return;
+    /* Cheats on: no unlocks (RetroAchievements' rule), until they are off again. */
+    static int cheating;
+    if (mhfu_cheats_active()) {
+        if (!cheating) { printf("achievements: paused while cheats are on\n"); cheating = 1; }
+        return;
+    }
+    if (cheating) { printf("achievements: on again\n"); cheating = 0; }
 #ifdef _WIN32
     /* How long the checks take, every 300 frames (10 s): they run on the
      * game's own thread, so whatever they cost, the game loses. */
