@@ -198,6 +198,10 @@ bool game_start(const Config &c, std::string &err) {
     if (c.fps60) env["MHFU_FPS"] = "60";
     if (c.volume != 100) env["MHFU_VOLUME"] = std::to_string(c.volume);
     if (c.mouse_sens != 100) env["MHFU_MOUSE_SENS"] = std::to_string(c.mouse_sens);
+    if (c.widescreen) env["MHFU_WIDESCREEN"] = "1";
+    std::string mods;                                     // "damage=0,gathering=1" (host/mods.c)
+    for (auto &m : c.mods) mods += (mods.empty() ? "" : ",") + m.first + "=" + (m.second ? "1" : "0");
+    if (!mods.empty()) env["MHFU_MODS"] = mods;
     env["MHFU_LAUNCHER_INI"] = (P(paths::launcher()) / "launcher.ini").u8string();   // the game's Options menu saves there
     if (c.gamepad == "none") env["MHFU_NO_GAMEPAD"] = "1";
     else if (!c.gamepad.empty()) env["MHFU_GAMEPAD_GUID"] = c.gamepad;
