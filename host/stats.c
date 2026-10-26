@@ -2,6 +2,7 @@
 #include "stats.h"
 
 #include "psprecomp/hle.h"
+#include "psprecomp/render.h"
 #include "audio.h"
 #include "input.h"
 #include "net/client.h"
@@ -68,7 +69,9 @@ void mhfu_stats_overlay(int show_fps, const char *fps_text, char *out, size_t ca
         if (ms >= 0) snprintf(ping, sizeof ping, "Ping %d ms", ms);
         else snprintf(ping, sizeof ping, "Ping --");
     }
-    if (show_fps && ping[0]) snprintf(out, cap, "%s   %s", fps_text, ping);
-    else if (show_fps) snprintf(out, cap, "%s", fps_text);
+    char fps[128];
+    snprintf(fps, sizeof fps, "%s%s", fps_text, psp_render_gl_interpolation() ? "  smooth 60" : "");
+    if (show_fps && ping[0]) snprintf(out, cap, "%s   %s", fps, ping);
+    else if (show_fps) snprintf(out, cap, "%s", fps);
     else snprintf(out, cap, "%s", ping);
 }

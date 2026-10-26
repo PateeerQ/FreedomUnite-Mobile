@@ -78,6 +78,8 @@ static struct {
     int nchat;
     uint64_t online_ms;          /* when this player came into the room */
     volatile int rtt_ms;         /* the round trip to the hub, smoothed; -1 not known */
+    int fps;                     /* what this player can play at (told to the hub) */
+    volatile int room_fps;       /* the room's, from the hub; 0 not known */
 } g;
 
 /* Datagrams in, read by the game, dropped; and how long the read ones waited. */
@@ -311,6 +313,12 @@ static void on_frame(int type, const uint8_t *b, uint32_t len) {
             }
         }
         break;
+    case MHN_ROOM_FPS:
+        if (len >= 1 + MHN_NICK_LEN && b[0] != g.room_fps) {
+            g.room_fps = b[0];
+            chat_push(b + 1, (const uint8_t *)(b[0] >= 60 ? "60" : "30"), 2, 2);
+        }
+        break;
     case MHN_CHAT:
         if (len > 6 + MHN_NICK_LEN) chat_push(b + 6, b + 6 + MHN_NICK_LEN, len - 6 - MHN_NICK_LEN, 0);
         break;
@@ -412,10 +420,15 @@ int mhn_client_start(const char *host, uint16_t port, int create, const char *co
     g.in_group = 0;
     g.online_ms = net_now_ms();
     g.rtt_ms = -1;
+    g.room_fps = 0;
     g.online = 1;
     g.stop = 0;
     net_unlock(g.lock);
     if (net_thread_start(reader, NULL) != 0) { g.online = 0; net_close(s); return -1; }
+    if (g.fps) {
+        const uint8_t f = (uint8_t)g.fps;
+        send_frame(MHN_FPS, &f, 1);
+    }
     return MHN_OK;
 }
 
@@ -434,6 +447,14 @@ void mhn_client_stop(void) {
 int mhn_client_online(void) { return g.online; }
 
 int mhn_client_ping_ms(void) { return g.online ? g.rtt_ms : -1; }
+
+void mhn_client_set_fps(int fps) {
+    g.fps = fps >= 60 ? 60 : 30;
+    const uint8_t b = (uint8_t)g.fps;
+    if (g.online) send_frame(MHN_FPS, &b, 1);
+}
+
+int mhn_client_room_fps(void) { return g.online ? g.room_fps : 0; }
 
 void mhn_client_code(char code[MHN_CODE_LEN]) {
     ensure_locks();
@@ -488,7 +509,7 @@ int mhn_lan_find(const char *code, char *host, int host_cap, uint16_t *port, int
 /* ---- room lists ---- */
 
 static int add_entry(mhn_room_info *out, int n, int max, const uint8_t *e, const char *host, uint16_t port,
-                     int relay) {
+                     int relay, int fps, int ping_ms) {
     char code[MHN_CODE_LEN];
     memcpy(code, e, MHN_CODE_LEN);
     code[MHN_CODE_LEN - 1] = 0;
@@ -504,6 +525,8 @@ static int add_entry(mhn_room_info *out, int n, int max, const uint8_t *e, const
     snprintf(r->host, sizeof r->host, "%s", host);
     r->port = port;
     r->relay = relay;
+    r->fps = fps;
+    r->ping_ms = ping_ms;
     return n + 1;
 }
 
@@ -512,25 +535,30 @@ int mhn_lan_list(mhn_room_info *out, int max, int timeout_ms) {
     net_sock u = net_udp_bind(0);
     if (u == NET_BAD_SOCK) return 0;
     static const uint8_t q[4] = { 'M', 'H', 'N', 'L' };
-    uint64_t until = net_now_ms() + (uint64_t)timeout_ms, next_send = 0;
+    uint64_t until = net_now_ms() + (uint64_t)timeout_ms, next_send = 0, sent = 0;
     int n = 0;
     while (net_now_ms() < until) {
         if (net_now_ms() >= next_send) {
+            sent = net_now_ms();
             net_udp_broadcast(u, MHN_PORT, q, sizeof q);
             net_udp_sendto(u, 0x7F000001u, MHN_PORT, q, sizeof q);   /* a hub on this machine */
             next_send = net_now_ms() + 300;
         }
         uint8_t ready;
         if (net_poll(&u, 1, &ready, 100) <= 0) continue;
-        uint8_t r[7 + 16 * MHN_ENTRY_LEN];
+        uint8_t r[7 + 16 * (MHN_ENTRY_LEN + 1)];
         uint32_t ip;
         const int got = net_udp_recvfrom(u, r, sizeof r, &ip, NULL);
         if (got < 7 || memcmp(r, "MHNR", 4) != 0) continue;
         char host[64];
         net_ip_str(ip, host, sizeof host);
         const uint16_t port = mhn_get16(r + 4);
-        for (int k = 0; k < r[6] && 7 + (k + 1) * MHN_ENTRY_LEN <= got; k++)
-            n = add_entry(out, n, max, r + 7 + k * MHN_ENTRY_LEN, host, port, 0);
+        const int k_all = r[6];
+        const int with_fps = got >= 7 + k_all * (MHN_ENTRY_LEN + 1);   /* a hub that says the frame rates */
+        const int ping = (int)(net_now_ms() - sent);
+        for (int k = 0; k < k_all && 7 + (k + 1) * MHN_ENTRY_LEN <= got; k++)
+            n = add_entry(out, n, max, r + 7 + k * MHN_ENTRY_LEN, host, port, 0,
+                          with_fps ? r[7 + k_all * MHN_ENTRY_LEN + k] : 0, ping);
     }
     net_close(u);
     return n;
@@ -541,8 +569,10 @@ int mhn_hub_list(const char *host, uint16_t port, mhn_room_info *out, int max, i
     net_sock s = net_tcp_connect(host, port, timeout_ms);
     if (s == NET_BAD_SOCK) return -1;
     const uint8_t ask[5] = { 1, 0, 0, 0, MHN_LIST };              /* length 1: just the type */
+    const uint64_t asked = net_now_ms();
     if (net_send_all(s, ask, sizeof ask) != 0) { net_close(s); return -1; }
-    static uint8_t b[5 + 4 + MHN_LIST_MAX * MHN_ENTRY_LEN];
+    static uint8_t b[5 + 4 + MHN_LIST_MAX * (MHN_ENTRY_LEN + 1)];
+    int ping = -1;
     uint32_t got = 0, want = 5;
     const uint64_t until = net_now_ms() + (uint64_t)timeout_ms;
     while (got < want && net_now_ms() < until) {
@@ -551,6 +581,7 @@ int mhn_hub_list(const char *host, uint16_t port, mhn_room_info *out, int max, i
         const int n = net_recv(s, b + got, want - got);
         if (n <= 0) break;
         got += (uint32_t)n;
+        if (ping < 0) ping = (int)(net_now_ms() - asked);           /* the answer's first bytes */
         if (got == 5 && want == 5) {
             const uint32_t fl = mhn_get32(b);
             if (b[4] != MHN_ROOM_LIST || fl < 5 || 4 + fl > sizeof b) break;
@@ -560,9 +591,11 @@ int mhn_hub_list(const char *host, uint16_t port, mhn_room_info *out, int max, i
     net_close(s);
     if (got < want || want < 9) return -1;
     const uint32_t count = mhn_get32(b + 5);
+    const int with_fps = got >= 9 + count * (MHN_ENTRY_LEN + 1);
     int n = 0;
     for (uint32_t k = 0; k < count && 9 + (k + 1) * MHN_ENTRY_LEN <= got; k++)
-        n = add_entry(out, n, max, b + 9 + k * MHN_ENTRY_LEN, host, port, 1);
+        n = add_entry(out, n, max, b + 9 + k * MHN_ENTRY_LEN, host, port, 1,
+                      with_fps ? b[9 + count * MHN_ENTRY_LEN + k] : 0, ping);
     return n;
 }
 

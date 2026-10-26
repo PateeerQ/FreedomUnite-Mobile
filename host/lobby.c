@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "about.h"
+#include "psprecomp/mem.h"
 #include "net/client.h"
 #include "net/hub.h"
 #include "net/sys.h"
@@ -71,6 +72,7 @@ void mhfu_lobby_init(const char *dir, const char *nick, const char *mac, const c
         g_mac[2] = 'H';
     }
     if (!f || !have_mac) save_cfg();
+    mhfu_fps_target();                   /* reads MHFU_FPS and tells the client what to say in rooms */
     /* net.cfg's relay, else the build's (never saved: a newer build may move it). */
     set_relay(g_cfg_relay[0] ? g_cfg_relay : MHFU_DEFAULT_RELAY);
     if (nick && nick[0]) snprintf(g_nick, sizeof g_nick, "%s", nick);
@@ -155,6 +157,8 @@ int mhfu_lobby_list(mhfu_room *out, int max) {
         out[w].players = found[i].players;
         out[w].locked = found[i].locked;
         out[w].internet = found[i].relay;
+        out[w].fps = found[i].fps;
+        out[w].ping_ms = found[i].ping_ms;
         w++;
     }
     return w;
@@ -203,6 +207,49 @@ void mhfu_lobby_status(char *out, size_t cap) {
     if (ms >= 0) snprintf(ping, sizeof ping, ", ping %d ms", ms);
     snprintf(out, cap, "Room %s (%s%s), %d player%s%s", code, g_on_relay ? "internet" : "LAN",
              g_hub ? ", hosting" : "", n, n == 1 ? "" : "s", ping);
+}
+
+static int g_fps_pref = -1;          /* -1: not read yet */
+
+void mhfu_fps_set_preferred(int fps) {
+    g_fps_pref = fps >= 60 ? 60 : 30;
+    mhn_client_set_fps(g_fps_pref);
+}
+
+int mhfu_fps60(void) { return mhfu_fps_target() >= 60; }
+
+unsigned mhfu_fps_tog(int which) {
+    static unsigned t[8];
+    return t[which & 7] ^= 1u;
+}
+
+/* At 0x09B07C98 in game_task's data: 2.0, 3.0, 4.0 at 30 fps, halved at 60
+ * (the "60 FPS" cheat's last group). Only written when the three are one of
+ * the two sets, which is also how another overlay in the slot is left alone. */
+void mhfu_fps60_data(void) {
+    static const uint32_t at30[3] = { 0x40000000u, 0x40400000u, 0x40800000u };
+    static const uint32_t at60[3] = { 0x3F800000u, 0x3FC00000u, 0x40000000u };
+    const uint32_t a = 0x09B07C98u;
+    const uint32_t now[3] = { psp_read32(a), psp_read32(a + 4), psp_read32(a + 8) };
+    const int fps60 = mhfu_fps60();
+    const uint32_t *from = fps60 ? at30 : at60, *to = fps60 ? at60 : at30;
+    if (memcmp(now, from, sizeof now)) return;
+    for (int i = 0; i < 3; i++) psp_write32(a + 4u * (uint32_t)i, to[i]);
+}
+
+int mhfu_fps_preferred(void) {
+    if (g_fps_pref < 0) mhfu_fps_target();
+    return g_fps_pref;
+}
+
+int mhfu_fps_target(void) {
+    if (g_fps_pref < 0) {
+        const char *e = getenv("MHFU_FPS");
+        mhfu_fps_set_preferred(e && atoi(e) >= 60 ? 60 : 30);
+    }
+    if (!mhn_client_online()) return g_fps_pref;
+    const int room = mhn_client_room_fps();
+    return room >= 60 && g_fps_pref >= 60 ? 60 : 30;
 }
 
 void mhfu_lobby_mac(uint8_t mac[6]) { memcpy(mac, g_mac, 6); }

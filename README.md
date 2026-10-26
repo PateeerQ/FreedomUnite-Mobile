@@ -79,9 +79,10 @@ Put the ISO, the EBOOT and the fonts (loose, or in a `font` folder) in one
 folder on the phone. The first time, the app asks for it ("Use this folder");
 after that it goes straight into the game.
 
-- **Touch buttons**: stick, D-pad, face buttons, L/R, Select/Start, and a
-  right stick ("CAM") for the camera. Hidden while a controller is connected
-  (Virtual gamepad: Automatic / On / Off).
+- **Touch buttons**: stick, D-pad, face buttons, L/R, Select/Start. Hidden while
+  a controller is connected (Virtual gamepad: Automatic / On / Off).
+- **Camera**: drag a finger anywhere away from the buttons: sideways turns the
+  camera, a longer drag up or down looks up or down.
 - **Drawer**: swipe in from the left edge, press Back, or tap the menu button.
   Multiplayer, RetroAchievements, Virtual gamepad, Edit button layout, Button
   opacity, Show FPS, Check for updates, About, Exit.

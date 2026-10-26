@@ -683,7 +683,12 @@ int main(int argc, char **argv) {
             mhfu_ach_start(iso, cache);
             mhfu_input_set_pacing(1);
             if (renderer && !strcmp(renderer, "gl")) {
-                if (mhfu_window_gl() == 0) printf("renderer: OpenGL, %dx internal resolution\n", window);
+                if (mhfu_window_gl() == 0) {
+                    printf("renderer: OpenGL, %dx internal resolution\n", window);
+                    /* MHFU_SMOOTH=1: in-between frames, 60 a second (F4 in the window toggles them). */
+                    const char *smooth = getenv("MHFU_SMOOTH");
+                    if (smooth && atoi(smooth)) psp_render_gl_set_interpolation(1);
+                }
                 else fprintf(stderr, "no OpenGL; using the software renderer\n");
             }
         }

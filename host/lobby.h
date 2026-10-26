@@ -40,6 +40,8 @@ typedef struct {
     int  players;
     int  locked;            /* has a passcode */
     int  internet;          /* on the relay, rather than this network */
+    int  fps;               /* the room's frame rate (30 or 60; 0 when its hub does not say) */
+    int  ping_ms;           /* the round trip to its hub; -1 not known */
 } mhfu_room;
 
 /* The rooms on this network and on the relay (if one is set); how many were
@@ -53,6 +55,20 @@ int  mhfu_lobby_check_passcode(const char *passcode);
 void mhfu_lobby_status(char *out, size_t cap);
 /* The room's code, or "" when not in one. */
 void mhfu_lobby_code(char code[8]);
+
+/* The frame rate the game should play at: the player's choice (MHFU_FPS=60,
+ * F4 in the window, the Android menu), and in a room no more than the room's
+ * (the slowest member's; 30 while unknown). The recompiled EBOOT asks
+ * mhfu_fps60() / mhfu_frame_vblanks() where tools/fps60_patch.py put them. */
+int  mhfu_fps_target(void);
+int  mhfu_fps_preferred(void);
+int  mhfu_fps60(void);
+/* The cheat's toggles (tools/fps60_patch.py): flips toggle `which`, returns it. */
+unsigned mhfu_fps_tog(int which);
+/* game_task's table of floats that the 60 fps mode changes (data, not code):
+ * once an interrupt tick, as a cheat engine would. */
+void mhfu_fps60_data(void);
+void mhfu_fps_set_preferred(int fps);
 
 void mhfu_lobby_mac(uint8_t mac[6]);
 const char *mhfu_lobby_nick(void);

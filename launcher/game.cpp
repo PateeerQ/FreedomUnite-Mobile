@@ -195,6 +195,7 @@ bool game_start(const Config &c, std::string &err) {
     if (!c.extra_args.empty()) cmd += L" " + W(c.extra_args);
 
     std::map<std::string, std::string> env{{"MHFU_RENDER", "gl"}};
+    if (c.fps60) env["MHFU_FPS"] = "60";
     if (c.gamepad == "none") env["MHFU_NO_GAMEPAD"] = "1";
     else if (!c.gamepad.empty()) env["MHFU_GAMEPAD_GUID"] = c.gamepad;
     if (c.ra_ingame && !c.ra_user.empty() && !c.ra_token.empty()) {

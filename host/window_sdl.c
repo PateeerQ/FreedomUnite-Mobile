@@ -268,7 +268,7 @@ static void text_centered(canvas *c, float cx, float cy, int px, uint32_t col, c
  * directions, and a finger slides from button to button. The drawer turns the
  * controls on, off or automatic -- off while a controller is connected. */
 
-enum { T_NONE, T_STICK, T_DPAD, T_CROSS, T_CIRCLE, T_SQUARE, T_TRIANGLE, T_L, T_R, T_SELECT, T_START, T_MENU, T_EDGE, T_RSTICK };
+enum { T_NONE, T_STICK, T_DPAD, T_CROSS, T_CIRCLE, T_SQUARE, T_TRIANGLE, T_L, T_R, T_SELECT, T_START, T_MENU, T_EDGE, T_RSTICK, T_SWIPE };
 enum { VPAD_AUTO, VPAD_ON, VPAD_OFF };
 enum { G_STICK, G_DPAD, G_FACE, G_L, G_R, G_SELECT, G_START, G_MENU, G_RSTICK, G_COUNT };
 static const char *const k_group_name[G_COUNT] = { "stick", "dpad", "face", "l", "r", "select", "start", "menu", "rstick" };
@@ -280,8 +280,9 @@ static int     g_edit;                                 /* the layout editor is o
 static int     g_edit_sel = -1;                        /* the group being edited */
 static uint32_t g_touch_buttons;
 static int     g_touch_ax = -1, g_touch_ay = -1;         /* the stick, 0-255; -1 not touched */
-static float   g_touch_rx, g_touch_ry;                  /* the right stick's knob, -1..1 */
-static int     g_touch_rheld;
+static float   g_touch_rx, g_touch_ry;                  /* where the camera swipe went down */
+static int     g_touch_rheld;                           /* a camera swipe is on */
+static float   g_swipe_x, g_swipe_y;                    /* and where its finger is now */
 static SDL_AtomicInt g_touch_btn_atomic, g_touch_stick_atomic;  /* for the game thread */
 static SDL_AtomicInt g_remake;                       /* the surface changed: the render thread rebinds */
 static SDL_AtomicInt g_background;                   /* the app is in the background: no drawing */
@@ -291,7 +292,7 @@ static SDL_AtomicInt g_background;                   /* the app is in the backgr
 typedef struct { int set; float cx, cy, k; } placed;
 static placed g_place[G_COUNT];
 
-typedef struct { SDL_FingerID id; int elem; float x, y; } finger;
+typedef struct { SDL_FingerID id; int elem; float x, y, sx, sy; } finger;   /* sx, sy: where it went down */
 #define FINGERS 10
 static finger g_fingers[FINGERS];
 
@@ -310,6 +311,7 @@ static int vpad_visible(void) {
  * 0: what the game was started with). The renderer takes it when it starts,
  * so a change shows after a restart. */
 static int g_res_setting;
+static int g_fps60;                  /* the 60 fps mode (mhfu_fps_set_preferred) */
 
 static char g_settings_path[1024];
 static void settings_load(void) {
@@ -327,6 +329,7 @@ static void settings_load(void) {
         if (sscanf(line, "show_fps=%d", &v) == 1) g_show_fps_init = v;
         if (sscanf(line, "button_opacity=%d", &v) == 1 && v >= 10 && v <= 100) g_vpad_alpha = v;
         if (sscanf(line, "resolution=%d", &v) == 1 && v >= 1 && v <= 4) g_res_setting = v;
+        if (sscanf(line, "fps60=%d", &v) == 1) g_fps60 = v != 0;
         if (sscanf(line, "layout_%31[a-z]=%f,%f,%f", name, &x, &y, &k) == 4)
             for (int g = 0; g < G_COUNT; g++)
                 if (!strcmp(name, k_group_name[g])) g_place[g] = (placed){ 1, x, y, k };
@@ -339,6 +342,7 @@ static void settings_save(void) {
     fprintf(f, "# MHFU: the in-game menu's settings\nvirtual_gamepad=%d\nshow_fps=%d\nbutton_opacity=%d\n",
             g_vpad_mode, g_show_fps_init, g_vpad_alpha);
     if (g_res_setting) fprintf(f, "resolution=%d\n", g_res_setting);
+    fprintf(f, "fps60=%d\n", g_fps60);
     for (int g = 0; g < G_COUNT; g++)
         if (g_place[g].set)
             fprintf(f, "layout_%s=%.4f,%.4f,%.3f\n", k_group_name[g], g_place[g].cx, g_place[g].cy, g_place[g].k);
@@ -416,7 +420,6 @@ static int hit(const layout *L, float x, float y) {
     }
     if (best) return best;
     if (dist(x, y, L->x[G_DPAD], L->y[G_DPAD]) < dpad_r(L) * 1.25f) return T_DPAD;
-    if (dist(x, y, L->x[G_RSTICK], L->y[G_RSTICK]) < rstick_r(L) * 1.3f) return T_RSTICK;
     if (dist(x, y, L->x[G_STICK], L->y[G_STICK]) < stick_r(L) * 1.6f) return T_STICK;
     return T_NONE;
 }
@@ -447,21 +450,21 @@ static void touch_update(float w, float h) {
             if (m > 1) { dx /= m; dy /= m; }
             ax = (int)(128 + dx * 127);
             ay = (int)(128 + dy * 127);
-        } else if (f->elem == T_RSTICK) {
-            const float r = rstick_r(&L);
-            float dx = (f->x - L.x[G_RSTICK]) / r, dy = (f->y - L.y[G_RSTICK]) / r;
-            const float m = sqrtf(dx * dx + dy * dy);
-            if (m > 1) { dx /= m; dy /= m; }
-            rx = dx;
-            ry = dy;
+        } else if (f->elem == T_SWIPE) {
+            /* The camera: a finger on the screen away from the buttons, dragged
+             * from where it went down, holds the d-pad that way (MHFU turns
+             * the camera with it): sideways turns, up and down (a longer drag,
+             * so a sideways one does not tilt too) look up and down. */
+            const float dx = f->x - f->sx, dy = f->y - f->sy;
+            if (dx > L.h * 0.04f) b |= PSP_CTRL_RIGHT;
+            if (dx < -L.h * 0.04f) b |= PSP_CTRL_LEFT;
+            if (dy > L.h * 0.08f) b |= PSP_CTRL_DOWN;
+            if (dy < -L.h * 0.08f) b |= PSP_CTRL_UP;
+            rx = f->sx;
+            ry = f->sy;
             rheld = 1;
-            if (m > 0.4f) {
-                const float a = atan2f(dy, dx) * 180 / 3.14159265f;
-                if (a > -67.5f && a < 67.5f) b |= PSP_CTRL_RIGHT;
-                if (a > 22.5f && a < 157.5f) b |= PSP_CTRL_DOWN;
-                if (a > 112.5f || a < -112.5f) b |= PSP_CTRL_LEFT;
-                if (a > -157.5f && a < -22.5f) b |= PSP_CTRL_UP;
-            }
+            g_swipe_x = f->x;
+            g_swipe_y = f->y;
         } else if (f->elem == T_DPAD) {
             const float dx = f->x - L.x[G_DPAD], dy = f->y - L.y[G_DPAD];
             if (sqrtf(dx * dx + dy * dy) > dpad_r(&L) * 0.2f) {
@@ -533,14 +536,12 @@ static void draw_vpad(canvas *c, float s) {
     if (g_touch_ax >= 0) { kx += (g_touch_ax - 128) / 127.0f * sr; ky += (g_touch_ay - 128) / 127.0f * sr; }
     disc(c, S(kx), S(ky), S(sr * 0.45f), g_touch_ax >= 0 ? on : va(236, 194, 104, 90));
     ring(c, S(kx), S(ky), S(sr * 0.45f), t, line);
-    /* the right stick: the camera (the d-pad) */
-    const float rr = rstick_r(&L);
-    disc(c, S(L.x[G_RSTICK]), S(L.y[G_RSTICK]), S(rr), fillc);
-    ring(c, S(L.x[G_RSTICK]), S(L.y[G_RSTICK]), S(rr), t, line);
-    const float rkx = L.x[G_RSTICK] + g_touch_rx * rr, rky = L.y[G_RSTICK] + g_touch_ry * rr;
-    disc(c, S(rkx), S(rky), S(rr * 0.45f), g_touch_rheld ? on : va(236, 194, 104, 90));
-    ring(c, S(rkx), S(rky), S(rr * 0.45f), t, line);
-    if (!g_touch_rheld) text_centered(c, S(L.x[G_RSTICK]), S(L.y[G_RSTICK]), (int)S(rr * 0.30f), white, "CAM");
+    /* the camera swipe, while a finger does it */
+    if (g_touch_rheld) {
+        const float rr = L.h * 0.06f;
+        ring(c, S(g_touch_rx), S(g_touch_ry), S(rr), t, line);
+        disc(c, S(g_swipe_x), S(g_swipe_y), S(rr * 0.4f), on);
+    }
     /* the face buttons, in the PSP's shapes and colours */
     const struct { float ox, oy; uint32_t bit; int shape; uint32_t tint; } face[4] = {
         { 0, 1, PSP_CTRL_CROSS, 0, va(140, 180, 245, 220) }, { 1, 0, PSP_CTRL_CIRCLE, 1, va(245, 120, 120, 220) },
@@ -644,6 +645,7 @@ static void edit_touch(const SDL_Event *e, float w, float h) {
         int best = -1;
         float best_area = 1e30f;
         for (int g = 0; g < G_COUNT; g++) {
+            if (g == G_RSTICK) continue;                   /* the camera is a swipe now */
             float x0, y0, x1, y1;
             group_box(&L, g, &x0, &y0, &x1, &y1);
             if (px >= x0 && px < x1 && py >= y0 && py < y1 && (x1 - x0) * (y1 - y0) < best_area) {
@@ -673,6 +675,7 @@ static void draw_editor(canvas *c, float s) {
     const layout L = layout_for(w, h);
     const uint32_t gold = rgba(236, 194, 104, 255);
     for (int g = 0; g < G_COUNT; g++) {
+        if (g == G_RSTICK) continue;
         float x0, y0, x1, y1;
         group_box(&L, g, &x0, &y0, &x1, &y1);
         const int sel = g == g_edit_sel;
@@ -709,7 +712,7 @@ static void draw_editor(canvas *c, float s) {
  * Android dialogs (MhfuActivity, over JNI): they need text fields. */
 
 enum { R_HEAD, R_ITEM };
-enum { M_RESUME, M_NET, M_ACH, M_VPAD, M_EDIT, M_OPACITY, M_FPS, M_RES, M_SAVES, M_FILES, M_CRASH, M_UPDATE, M_ABOUT, M_EXIT };
+enum { M_RESUME, M_NET, M_ACH, M_VPAD, M_EDIT, M_OPACITY, M_FPS, M_RES, M_SMOOTH, M_SAVES, M_FILES, M_CRASH, M_UPDATE, M_ABOUT, M_EXIT };
 typedef struct { int kind, id; const char *text; } menu_row;
 static const menu_row k_menu[] = {
     { R_HEAD, -1, "GAME" },     { R_ITEM, M_RESUME, "Back to game" },
@@ -718,7 +721,8 @@ static const menu_row k_menu[] = {
 #endif
     { R_HEAD, -1, "CONTROLS" }, { R_ITEM, M_VPAD, "Virtual gamepad" }, { R_ITEM, M_EDIT, "Edit button layout" },
     { R_ITEM, M_OPACITY, "Button opacity" },
-    { R_HEAD, -1, "DISPLAY" },  { R_ITEM, M_RES, "Resolution" }, { R_ITEM, M_FPS, "Show FPS" },
+    { R_HEAD, -1, "DISPLAY" },  { R_ITEM, M_RES, "Resolution" }, { R_ITEM, M_SMOOTH, "60 FPS (beta)" },
+    { R_ITEM, M_FPS, "Show FPS" },
     { R_HEAD, -1, "APP" },
 #ifdef __ANDROID__
     { R_ITEM, M_SAVES, "Save folder" },
@@ -776,6 +780,7 @@ static const char *menu_value(int id) {
     switch (id) {
     case M_VPAD: return vp[g_vpad_mode];
     case M_FPS: return g_show_fps ? "On" : "Off";
+    case M_SMOOTH: return !g_fps60 ? "Off" : mhfu_fps_target() >= 60 ? "On" : "On (room at 30)";
     case M_RES: {
         static char r[40];
         const int want = g_res_setting ? g_res_setting : g_scale;
@@ -889,6 +894,7 @@ static void menu_tap(float px, float py, float w, float h) {
             case M_RESUME: menu_set(0); break;
             case M_VPAD: g_vpad_mode = (g_vpad_mode + 1) % 3; settings_save(); break;
             case M_FPS: g_show_fps = !g_show_fps; g_show_fps_init = g_show_fps; settings_save(); break;
+            case M_SMOOTH: g_fps60 = !g_fps60; mhfu_fps_set_preferred(g_fps60 ? 60 : 30); settings_save(); break;
             case M_RES: g_res_setting = (g_res_setting ? g_res_setting : g_scale) % 4 + 1; settings_save(); break;
             case M_EDIT: menu_set(0); edit_open(); break;
 #ifdef __ANDROID__
@@ -1342,6 +1348,7 @@ int mhfu_window_gl(void) {
     if (psp_render_gl_start(&host, g_scale) != 0) return -1;
     if (psp_render_select("gl") != 0) return -1;
     g_gl = 1;
+    if (g_fps60) mhfu_fps_set_preferred(60);
     wake(g_ev_wake);
     return 0;
 }
@@ -1593,8 +1600,13 @@ int mhfu_window_main(int (*game)(int, char **), int argc, char **argv) {
                         if (el && vpad_visible()) {
                             g_fingers[free_slot].id = e.tfinger.fingerID;
                             g_fingers[free_slot].elem = el;
-                            g_fingers[free_slot].x = px;
-                            g_fingers[free_slot].y = py;
+                            g_fingers[free_slot].x = g_fingers[free_slot].sx = px;
+                            g_fingers[free_slot].y = g_fingers[free_slot].sy = py;
+                        } else if (!el || !vpad_visible()) {   /* nothing there: the camera */
+                            g_fingers[free_slot].id = e.tfinger.fingerID;
+                            g_fingers[free_slot].elem = T_SWIPE;
+                            g_fingers[free_slot].x = g_fingers[free_slot].sx = px;
+                            g_fingers[free_slot].y = g_fingers[free_slot].sy = py;
                         }
                     } else if (slot >= 0 && e.type == SDL_EVENT_FINGER_MOTION && g_fingers[slot].elem == T_EDGE) {
                         if (px - g_fingers[slot].x > ww * 0.05f) { g_fingers[slot].elem = T_NONE; menu_set(1); moving = 1; }
@@ -1605,7 +1617,7 @@ int mhfu_window_main(int (*game)(int, char **), int argc, char **argv) {
                         f->y = py;
                         /* A finger slides from button to button; the stick and
                          * the d-pad keep it wherever it goes. */
-                        if (f->elem != T_STICK && f->elem != T_DPAD && f->elem != T_RSTICK) {
+                        if (f->elem != T_STICK && f->elem != T_DPAD && f->elem != T_SWIPE) {
                             const int el = hit(&L, px, py);
                             if (el && el != T_MENU && el != T_STICK && el != T_DPAD && el != T_RSTICK) f->elem = el;
                         }

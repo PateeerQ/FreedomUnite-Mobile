@@ -24,6 +24,11 @@ int  mhn_client_start(const char *host, uint16_t port, int create, const char *c
 void mhn_client_stop(void);
 /* 1 while in a room. A lost connection drops back to 0. */
 int  mhn_client_online(void);
+/* The frame rate this player can play at (30 or 60), told to the hub now and
+ * at every room joined; and the room's, the slowest member's (0 before the
+ * hub said, or with a hub too old to: treat as 30). */
+void mhn_client_set_fps(int fps);
+int  mhn_client_room_fps(void);
 /* The round trip to the hub (the relay, or the LAN host), in ms, smoothed;
  * -1 before the first answer or with a hub too old to answer. */
 int  mhn_client_ping_ms(void);
@@ -53,6 +58,8 @@ typedef struct {
     char host[64];          /* the hub that holds it */
     uint16_t port;
     int  relay;             /* on a relay (internet), not the LAN */
+    int  fps;               /* the room's frame rate (its slowest member's); 0 from a hub that does not say */
+    int  ping_ms;           /* the round trip to its hub, as the list came back; -1 not known */
 } mhn_room_info;
 
 /* The rooms hubs on this network hold, from a broadcast and whatever answers
@@ -68,7 +75,8 @@ int  mhn_hub_list(const char *host, uint16_t port, mhn_room_info *out, int max, 
 int  mhn_chat_send(const char *text);
 /* The oldest line that came in: 1 and its sender, 0 when none is waiting.
  * `*joined` is 0 for a chat line; 1 or -1 when `nick` came into the room or
- * left it (text empty). Those already in the room when this player came in
+ * left it (text empty); 2 when the room's frame rate changed (text "30" or
+ * "60", `nick` the slowest player). Those already in the room when this player came in
  * are not news: see mhn_client_members. */
 int  mhn_chat_next(char *nick, int nick_cap, char *text, int text_cap, int *joined);
 

@@ -19,6 +19,7 @@ struct Config {
     int  render_scale = 2;              // the GE's internal resolution: 480x272 times this
     std::string output = "960x544";     // the window's client size, "WxH"
     bool fullscreen = false;
+    bool fps60 = false;                 // the 60 fps mode (MHFU_FPS=60; in a room, as the room allows)
     std::string nick;                   // multiplayer name (--nick); empty: net.cfg's
     std::string gamepad;                // "": the first connected, "none": keyboard only, else an SDL GUID
     std::string gamepad_name;           // that GUID's device name, for showing

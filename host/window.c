@@ -254,7 +254,10 @@ static void show_rooms(HWND d, const mhfu_room *found, int n) {
     memcpy(g_rooms, found, (size_t)g_nrooms * sizeof *g_rooms);
     for (int i = 0; i < g_nrooms; i++) {
         char line[128];
-        snprintf(line, sizeof line, "%-24s %d/4   %s%s", g_rooms[i].name, g_rooms[i].players,
+        char fps[12] = "", ping[16] = "";
+        if (g_rooms[i].fps) snprintf(fps, sizeof fps, "%d FPS  ", g_rooms[i].fps);
+        if (g_rooms[i].ping_ms >= 0) snprintf(ping, sizeof ping, "%d ms  ", g_rooms[i].ping_ms);
+        snprintf(line, sizeof line, "%-24s %d/4   %s%s%s%s", g_rooms[i].name, g_rooms[i].players, fps, ping,
                  g_rooms[i].locked ? "[passcode]  " : "", g_rooms[i].internet ? "(internet)" : "(LAN)");
         SendMessageA(list, LB_ADDSTRING, 0, (LPARAM)line);
     }
@@ -470,6 +473,11 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_KEYDOWN: case WM_SYSKEYDOWN:
         if (wp == VK_F3 && !(lp & (1 << 30))) {
             g_show_fps = !g_show_fps;
+            if (g_gl) gl_overlay_text(overlay_line());
+            return 0;
+        }
+        if (wp == VK_F4 && !(lp & (1 << 30))) {                /* 60 fps mode (in a room: as the room allows) */
+            mhfu_fps_set_preferred(mhfu_fps_preferred() >= 60 ? 30 : 60);
             if (g_gl) gl_overlay_text(overlay_line());
             return 0;
         }

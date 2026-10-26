@@ -54,7 +54,14 @@ static void show_incoming(void) {
     while (mhn_chat_next(nick, sizeof nick, text, sizeof text, &joined)) {
         tidy(nick);
         tidy(text);
-        if (joined) {
+        if (joined == 2) {                              /* the room's frame rate: news to one who wants 60 */
+            if (mhfu_fps_preferred() < 60) continue;
+            char notice[MHN_NICK_LEN + 48];
+            if (!strcmp(text, "60")) snprintf(notice, sizeof notice, "Room runs at 60 FPS");
+            else if (nick[0]) snprintf(notice, sizeof notice, "Room runs at 30 FPS: %s plays at 30", nick);
+            else snprintf(notice, sizeof notice, "Room runs at 30 FPS");
+            mhfu_window_chat("", notice, 2);
+        } else if (joined) {
             char notice[MHN_NICK_LEN + 32];
             snprintf(notice, sizeof notice, "%s %s the server", nick[0] ? nick : "Hunter", joined > 0 ? "joined" : "left");
             mhfu_window_chat("", notice, 2);

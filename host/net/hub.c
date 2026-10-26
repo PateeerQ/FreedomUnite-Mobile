@@ -32,6 +32,7 @@ typedef struct {
     uint64_t since_ms;           /* when it connected */
     uint64_t win_ms, win_bytes;  /* what it sent in the current second */
     uint64_t chat_ms[MHN_CHAT_BURST];   /* when its last few chat lines came */
+    int fps;                     /* what it can play at (MHN_FPS); 30 until it says */
     int dead;
     char ip[48];
 } client;
@@ -137,8 +138,11 @@ static int room_members(mhn_hub *h, int r) {
     return n;
 }
 
-/* The rooms anyone is in, as list entries; returns how many were written. */
-static int list_entries(mhn_hub *h, uint8_t *out, int max) {
+static int room_fps_of(mhn_hub *h, int r, const client **slow);
+
+/* The rooms anyone is in, as list entries, and each one's frame rate into
+ * `fps` (the list's trailer); returns how many were written. */
+static int list_entries(mhn_hub *h, uint8_t *out, uint8_t *fps, int max) {
     int n = 0;
     for (int r = 0; r < MAX_ROOMS && n < max; r++) {
         if (!h->rooms[r].used) continue;
@@ -149,6 +153,7 @@ static int list_entries(mhn_hub *h, uint8_t *out, int max) {
         memcpy(e + MHN_CODE_LEN, h->rooms[r].name, MHN_NAME_LEN);
         e[MHN_CODE_LEN + MHN_NAME_LEN] = (uint8_t)members;
         e[MHN_CODE_LEN + MHN_NAME_LEN + 1] = h->rooms[r].pass[0] ? 1 : 0;
+        fps[n] = (uint8_t)room_fps_of(h, r, NULL);
         n++;
     }
     return n;
@@ -291,6 +296,33 @@ static void chat(mhn_hub *h, client *c, const uint8_t *b, uint32_t len) {
     }
 }
 
+/* ---- the room's frame rate: the slowest member's ---- */
+
+/* The slowest member's frame rate (60 for an empty room). */
+static int room_fps_of(mhn_hub *h, int r, const client **slow) {
+    int fps = 60;
+    for (int i = 0; i < h->ncl; i++) {
+        const client *c = h->cl[i];
+        if (c->dead || c->room != r) continue;
+        if (c->fps < fps) { fps = c->fps; if (slow) *slow = c; }
+    }
+    return fps;
+}
+
+static void room_fps(mhn_hub *h, int r) {
+    if (r < 0) return;
+    const client *slow = NULL;
+    const int fps = room_fps_of(h, r, &slow);
+    uint8_t b[1 + MHN_NICK_LEN];
+    memset(b, 0, sizeof b);
+    b[0] = (uint8_t)fps;
+    if (slow) memcpy(b + 1, slow->nick, MHN_NICK_LEN);
+    for (int i = 0; i < h->ncl; i++) {
+        client *c = h->cl[i];
+        if (!c->dead && c->room == r) send_frame(c, MHN_ROOM_FPS, b, sizeof b);
+    }
+}
+
 /* ---- the session ---- */
 
 static void hello(mhn_hub *h, client *c, const uint8_t *b, uint32_t len) {
@@ -367,13 +399,16 @@ static void hello(mhn_hub *h, client *c, const uint8_t *b, uint32_t len) {
     char ms[18];
     mac_str(c->mac, ms);
     logf_("hub: %s (%s, %s) is in room %s, %d member(s)", c->nick, ms, c->ip, h->rooms[r].code, members + 1);
+    room_fps(h, r);
 }
 
 static void send_list(mhn_hub *h, client *c) {
-    static uint8_t b[4 + MHN_LIST_MAX * MHN_ENTRY_LEN];
-    const int n = list_entries(h, b + 4, MHN_LIST_MAX);
+    static uint8_t b[4 + MHN_LIST_MAX * (MHN_ENTRY_LEN + 1)];
+    uint8_t fps[MHN_LIST_MAX];
+    const int n = list_entries(h, b + 4, fps, MHN_LIST_MAX);
     mhn_put32(b, (uint32_t)n);
-    send_frame(c, MHN_ROOM_LIST, b, 4 + (uint32_t)n * MHN_ENTRY_LEN);
+    memcpy(b + 4 + n * MHN_ENTRY_LEN, fps, (size_t)n);              /* the frame rates, after the entries */
+    send_frame(c, MHN_ROOM_LIST, b, 4 + (uint32_t)n * (MHN_ENTRY_LEN + 1));
 }
 
 static void handle(mhn_hub *h, client *c, int type, uint8_t *b, uint32_t len) {
@@ -389,6 +424,9 @@ static void handle(mhn_hub *h, client *c, int type, uint8_t *b, uint32_t len) {
         route(h, c, type, b, len);
         break;
     case MHN_CHAT:          chat(h, c, b, len); break;
+    case MHN_FPS:
+        if (len >= 1) { c->fps = b[0] >= 60 ? 60 : 30; room_fps(h, c->room); }
+        break;
     case MHN_PING:          if (len >= 8) send_frame(c, MHN_PONG, b, len > 16 ? 16 : len); break;
     default:                break;
     }
@@ -407,6 +445,8 @@ static void drop(mhn_hub *h, int i) {
         }
         if (!left) h->rooms[c->room].empty_since = net_now_ms();
         logf_("hub: %s left room %s", c->nick, h->rooms[c->room].code);
+        c->dead = 1;                                  /* not counted any more */
+        room_fps(h, c->room);
     }
     net_close(c->s);
     free(c->buf);
@@ -448,12 +488,14 @@ static void lan_query(mhn_hub *h) {
     uint16_t port;
     int n = net_udp_recvfrom(h->usock, b, sizeof b, &ip, &port);
     if (n >= 4 && memcmp(b, "MHNL", 4) == 0) {             /* who has rooms here? */
-        static uint8_t r[4 + 2 + 1 + 16 * MHN_ENTRY_LEN];
+        static uint8_t r[4 + 2 + 1 + 16 * (MHN_ENTRY_LEN + 1)];
+        uint8_t fps[16];
         memcpy(r, "MHNR", 4);
         mhn_put16(r + 4, h->port);
-        const int k = list_entries(h, r + 7, 16);
+        const int k = list_entries(h, r + 7, fps, 16);
         r[6] = (uint8_t)k;
-        if (k) net_udp_sendto(h->usock, ip, port, r, 7 + (size_t)k * MHN_ENTRY_LEN);
+        memcpy(r + 7 + k * MHN_ENTRY_LEN, fps, (size_t)k);           /* the frame rates, after the entries */
+        if (k) net_udp_sendto(h->usock, ip, port, r, 7 + (size_t)k * (MHN_ENTRY_LEN + 1));
         return;
     }
     if (n < 4 + MHN_CODE_LEN || memcmp(b, "MHN?", 4) != 0) return;
@@ -500,6 +542,7 @@ static void accept_client(mhn_hub *h) {
     if (h->lim.send_timeout_ms) net_set_send_timeout(s, h->lim.send_timeout_ms);
     c->s = s;
     c->room = -1;
+    c->fps = 30;
     c->last_ms = c->since_ms = c->win_ms = now;
     snprintf(c->ip, sizeof c->ip, "%s", ip);
     h->cl[h->ncl++] = c;

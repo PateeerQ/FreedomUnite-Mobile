@@ -16,6 +16,7 @@
 
 #include "adhoc.h"
 #include "hle_mhfu.h"
+#include "lobby.h"
 #include "overlays.h"
 
 #include "psprecomp/dispatch.h"
@@ -242,6 +243,7 @@ static void vtimer_tick(void) {
 static void host_tick(void) {
     vtimer_tick();
     mhfu_adhoc_tick();
+    mhfu_fps60_data();
 }
 
 /* (const char *name, SceKernelVTimerOptParam *opt) */

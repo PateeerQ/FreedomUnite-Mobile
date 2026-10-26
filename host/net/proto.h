@@ -68,6 +68,11 @@ enum {
     MHN_CHAT = 31,          /* c->h: UTF-8 text, 1..MHN_CHAT_MAX bytes, no NUL.
                              * h->c: u8 mac[6], char nick[128], then the text: to everyone else in the room */
     MHN_PONG = 32,          /* h->c: a PING's body, back at once (hubs before it send none: no ping shown) */
+
+    /* The room's frame rate: everyone plays at the slowest one's, since the
+     * game's own netcode goes by frames. A player who never says counts as 30. */
+    MHN_FPS = 33,           /* c->h: u8 the frame rate this player can play at (30 or 60) */
+    MHN_ROOM_FPS = 34,      /* h->c: u8 the room's frame rate, char nick[128] of the slowest player (or "") */
 };
 
 #define MHN_CHAT_MAX     200           /* bytes of one message */
@@ -85,7 +90,10 @@ enum {
 
 /* A room in a list: char code[8], char name[32], u8 players, u8 locked. The
  * LAN form: a UDP "MHNL" broadcast, answered by every hub with "MHNR", u16
- * its TCP port, u8 n, then n of these. */
+ * its TCP port, u8 n, then n of these. Both lists (that one and MHN_ROOM_LIST)
+ * then carry n bytes more: each room's frame rate (30 or 60, its slowest
+ * member's). Hubs before it send none, and clients before it read only the n
+ * entries. */
 #define MHN_ENTRY_LEN (MHN_CODE_LEN + MHN_NAME_LEN + 2)
 #define MHN_LIST_MAX  64
 
