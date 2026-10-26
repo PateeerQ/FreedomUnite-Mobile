@@ -46,6 +46,7 @@
 #include "input.h"
 #include "libfont.h"
 #include "lobby.h"
+#include "mods.h"
 #include "utility.h"
 #include "window.h"
 
@@ -611,6 +612,8 @@ int main(int argc, char **argv) {
     /* Multiplayer: the room the game's ad hoc play goes through. The window's
      * Multiplayer menu does the same as these two options. */
     mhfu_lobby_init(g_root, nick, mac, relay);
+    mhfu_cheats_init(g_root);     /* <root>/cheats/ULES01213.ini (mods.c) */
+    mhfu_mod_widescreen();        /* reads MHFU_WIDESCREEN */
     mhfu_adhoc_register();
     if (net_create || net_join) {
         char err[256], status[128];
