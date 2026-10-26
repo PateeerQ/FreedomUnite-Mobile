@@ -17,16 +17,17 @@ RetroAchievements and ad hoc multiplayer through rooms.
 
 ## Status
 
-Version **0.1.0**. The game boots, plays its movies, creates and saves a
+Version **0.3.1**. The game boots, plays its movies, creates and saves a
 character, and runs the village (Pokke), the house, the Training School and
-quests in 3D at its own 30 fps, with sound, music, keyboard, controllers and
-touch buttons. A village quest has been played from start to finish without a
-crash, and players have hunted together through a room, on PC and on Android
-(Poco X7 Pro, 30 fps).
+quests in 3D at its own 30 fps, or at **60 fps** in the new 60 FPS mode (beta),
+with sound, music, keyboard, controllers and touch buttons. A village quest has
+been played from start to finish without a crash, and players have hunted
+together through a room, on the same network or over the internet, on PC and on
+Android (Poco X7 Pro).
 
 ### Progress
 
-Rough estimates, as of 2026-10-25. "Recompiled" means the code builds and is
+Rough estimates, as of 2026-10-26. "Recompiled" means the code builds and is
 switched in when the game loads it; "tested" means someone has played through it.
 
 | Area | Progress | Notes |
@@ -38,13 +39,13 @@ switched in when the game loads it; "tested" means someone has played through it
 | Graphics (GE + GL renderer) | ![70%](https://img.shields.io/badge/70%25-yellow?style=flat-square) | textures, lighting, fog, skinning, clipping, render-to-texture, GL 3.3 and GLES 3.0; missing: stencil, colour test, logic op, mipmaps, culling, DXT, specular, points/lines |
 | Audio | ![85%](https://img.shields.io/badge/85%25-brightgreen?style=flat-square) | sound effects, music (ATRAC3/3+ via FFmpeg), movie sound; small gaps while loading |
 | Movies | ![90%](https://img.shields.io/badge/90%25-brightgreen?style=flat-square) | H.264 + ATRAC3+ via FFmpeg, own PSMF demuxer |
-| Input | ![90%](https://img.shields.io/badge/90%25-brightgreen?style=flat-square) | keyboard, controllers (right stick = camera), touch buttons with a layout editor, text box for the game's keyboard |
-| Save data | ![80%](https://img.shields.io/badge/80%25-brightgreen?style=flat-square) | save and load work (unencrypted) |
-| Multiplayer (ad hoc over rooms) | ![85%](https://img.shields.io/badge/85%25-brightgreen?style=flat-square) | Create/Join Server with passcodes on PC and Android; Gathering Hall and quests together work on the LAN, smooth in quests; movement in the hall lags; no public relay yet |
+| Input | ![90%](https://img.shields.io/badge/90%25-brightgreen?style=flat-square) | keyboard, controllers (right stick = camera), touch buttons with a layout editor, swipe camera on Android, text box for the game's keyboard |
+| Save data | ![80%](https://img.shields.io/badge/80%25-brightgreen?style=flat-square) | save and load work (unencrypted); on Android a save folder of your choice, kept in sync |
+| Multiplayer (ad hoc over rooms) | ![85%](https://img.shields.io/badge/85%25-brightgreen?style=flat-square) | Create/Join Server with passcodes on PC and Android, on the LAN or over the internet relay; room chat, ping, 60 fps rooms; Gathering Hall and quests together, smooth in quests; movement in the hall lags |
 | RetroAchievements | ![70%](https://img.shields.io/badge/70%25-yellow?style=flat-square) | sign-in, game identified, unlock toasts, on PC and Android (softcore); not yet checked against a real unlock |
 | Gameplay coverage | ![40%](https://img.shields.io/badge/40%25-yellow?style=flat-square) | village life, a full quest, the Gathering Hall together; more maps and monsters untested |
-| PC release (launcher) | ![85%](https://img.shields.io/badge/85%25-brightgreen?style=flat-square) | launcher (play, profiles, keys, controllers, achievements, updates, log, about); v0.1.0 zip |
-| Android port | ![75%](https://img.shields.io/badge/75%25-yellow?style=flat-square) | runs at 30 fps; touch buttons, layout editor, drawer menu, multiplayer, achievements, updates; v0.1.0 APK |
+| PC release (launcher) | ![85%](https://img.shields.io/badge/85%25-brightgreen?style=flat-square) | launcher (play, profiles, keys, controllers, achievements, 60 FPS, updates, log, crash report, about); v0.3.1 zip |
+| Android port | ![75%](https://img.shields.io/badge/75%25-yellow?style=flat-square) | 30 fps, or 60 with 60 FPS mode; touch buttons, layout editor, drawer menu, multiplayer, achievements, save folder, crash log, updates; v0.3.1 APK |
 
 ## Playing
 
@@ -69,15 +70,20 @@ version and shows the game's log. Its settings live in `work/launcher/`.
 
 Keys: W/A/S/D = analog stick, arrows = D-pad, K or Space = Cross, L = Circle,
 J = Square, I = Triangle, Q = L, E = R, Enter = Start, V/Backspace = Select,
-F3 = FPS. Controllers (DualSense, DualShock, Xbox) work by button position; the
+F3 = FPS, F4 = 60 FPS mode, F5/F6 = volume down/up (also a slider in the
+launcher). **Mouse camera**: hold the right mouse button and move the mouse;
+F7 turns mouse look on without holding it. The game window's **Options** menu
+sets the volume, the mouse camera's sensitivity and mouse look (also sliders in
+the launcher). Controllers (DualSense, DualShock, Xbox) work by button position; the
 right stick moves the camera.
 
 ### Android
 
 Install `FreedomUniteRecomp-v<version>-android-arm64.apk` (arm64, Android 8+).
-Put the ISO, the EBOOT and the fonts (loose, or in a `font` folder) in one
-folder on the phone. The first time, the app asks for it ("Use this folder");
-after that it goes straight into the game.
+Put the ISO and the EBOOT in one folder on the phone. The first time, the app
+asks for it ("Use this folder"); after that it goes straight into the game.
+The fonts are taken from PPSSPP when it is installed (PPSSPP for Android dumps
+only the EBOOT); otherwise put the `.pgf` files in that folder too.
 
 - **Touch buttons**: stick, D-pad, face buttons, L/R, Select/Start. Hidden while
   a controller is connected (Virtual gamepad: Automatic / On / Off).
@@ -85,19 +91,39 @@ after that it goes straight into the game.
   camera, a longer drag up or down looks up or down.
 - **Drawer**: swipe in from the left edge, press Back, or tap the menu button.
   Multiplayer, RetroAchievements, Virtual gamepad, Edit button layout, Button
-  opacity, Show FPS, Check for updates, About, Exit.
+  opacity, Resolution, 60 FPS (beta), Show FPS, Save folder, Change game files,
+  Copy crash log, Check for updates, About, Exit.
 - **Edit button layout** moves and resizes every group of buttons.
+- **Save folder**: like PPSSPP's memory stick folder. Choose a folder you can
+  see (for example `Documents/MHFU`) and the saves are kept there too, so they
+  survive Clear data and reinstalling; **Load from folder** brings saves copied
+  there (for example from a PC) into the game.
+- **Crash log**: after a crash the app offers its log at the next start (Copy /
+  Share), for bug reports.
+
+### 60 FPS mode (beta)
+
+The game normally runs at the PSP's 30 fps. With **60 FPS (beta)** on (the
+launcher's checkbox or F4 on Windows, the drawer on Android) it runs at 60 at
+normal game speed: the community "60 FPS" cheat for `ULES01213` is built into
+the recompiled code. Online, a room runs at its slowest player's rate: 60 when
+everyone has it on, otherwise 30 for everyone (the chat says who).
 
 ### Multiplayer
 
 One player chooses **Create Server** (optionally with a 4-digit passcode); the
 others choose **Join Server** and pick the room (or type its code, `MH-4K7Q`).
+The list shows each room's players, passcode lock, 30/60 FPS and ping, nearest
+first, with a search box on Android.
 Then everyone goes online in the game as usual (the Gathering Hall). Rooms work
 on the same Wi-Fi or hotspot, between PCs and phones. On PC it is the game
 window's **Multiplayer** menu; on Android, the drawer. Rooms can also be made
 **over the internet** (Create Server → Internet) through the project's relay
 server, so players anywhere can join; nobody forwards a port. Another relay can
 be set with `relay=host:port` in `<root>/net.cfg`.
+
+In a room, **Select** opens the room chat (MHFU has none of its own); joins,
+leaves and the ping show top-left.
 
 ## Building
 
@@ -165,7 +191,7 @@ files). Keep that in mind before publishing them.
 |---|---|
 | `psprecomp/` | toolkit, as a git submodule |
 | `launcher/` | the PC launcher (`mhfu_launcher.exe`): ready check, profiles, display settings, keyboard and controller setup, RetroAchievements, updates, log, about |
-| `android/` | the Android app: Gradle project, `SetupActivity` (game folder), `MhfuActivity` (the game, its dialogs), `Updater` |
+| `android/` | the Android app: Gradle project, `SetupActivity` (game folder), `MhfuActivity` (the game, its dialogs), `RoomPicker` (Join Server), `SaveSync` (save folder), `CrashLog`, `Updater` |
 | `host/main.c` | the host: loads the EBOOT, sets up the boot thread, runs, reports |
 | `host/window.c` | the Win32 window: OpenGL context, keyboard, FPS overlay (F3), Multiplayer and Help menus |
 | `host/window_sdl.c` | the SDL3 window (Android, Linux): touch buttons, layout editor, drawer menu, toasts, text box |
@@ -178,7 +204,8 @@ files). Keep that in mind before publishing them.
 | `host/input.c` | controller: scripted presses, the window's keys, frame snapshots |
 | `host/atrac.c`, `host/mpeg.c` | sceAtrac3plus and sceMpeg, decoding with FFmpeg: music, movies with sound |
 | `host/audio.c`, `host/gamepad.c` | sound output and controllers, through SDL3 |
-| `host/lobby.c` | "Create Server" / "Join Server": rooms by code, settings in `<root>/net.cfg` |
+| `host/lobby.c` | "Create Server" / "Join Server": rooms by code, the room's frame rate, settings in `<root>/net.cfg` |
+| `host/chat.c`, `host/stats.c` | the room chat (Select) and the FPS / ping line |
 | `host/adhoc.c` | sceNet, sceNetAdhoc (PDP/PTP), sceNetAdhocctl, sceWlan and sceUtilityNetconf over the room network |
 | `host/net/` | the room network: protocol (`proto.h`), hub, client, sockets/threads for Windows and POSIX |
 | `host/overlays.h` | table of recompiled overlays (`work/gen_ovl/overlays.c`, written by setup) |
@@ -186,6 +213,7 @@ files). Keep that in mind before publishing them.
 | `tools/re/databin.py` | decrypts DATA.BIN as the game does and extracts every overlay |
 | `tools/mhfu_ovl.c` | wraps an overlay as an ELF for `allegrexrecomp` |
 | `tools/mhfu_netcheck.c` | end-to-end check of the room network without the game |
+| `tools/fps60_patch.py` | builds the 60 FPS cheat into the recompiled C (setup runs it) |
 | `tools/make_icon.py` | draws the app icon (Android mipmaps, `assets/icon/mhfu.ico`) |
 | `patches/psprecomp/` | fixes to psprecomp not upstream yet; `setup.ps1` applies them |
 | `scripts/setup.ps1` | builds the tool, extracts the disc, recompiles the EBOOT and overlays, builds the host |
