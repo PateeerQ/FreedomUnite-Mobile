@@ -1,0 +1,153 @@
+[
+ {
+  "id": "targetcam",
+  "name": "Target Camera + Crosshair",
+  "description": "Hold L to look at the large monster; a crosshair for bowguns.",
+  "default": true,
+  "base": 165803520,
+  "size": 6656,
+  "entries": [
+   60279808,
+   60282688,
+   60282704,
+   60282720,
+   60282736,
+   60282752,
+   60282768,
+   60282784,
+   60282816,
+   60309120,
+   92000400,
+   131099180,
+   131099760,
+   165803520,
+   165803904
+  ],
+  "hooks": [
+   {
+    "addr": 143160564,
+    "unit": "eboot",
+    "orig": 2388918772,
+    "word": 175668608,
+    "kind": "j",
+    "target": 165803520
+   },
+   {
+    "addr": 143037456,
+    "unit": "eboot",
+    "orig": 2758028410,
+    "word": 175668704,
+    "kind": "j",
+    "target": 165803904
+   }
+  ],
+  "returns": [
+   143037460,
+   143160568
+  ],
+  "notes": [
+   "0891F9FC: through the game's register, EU offset -0x23d6",
+   "0891FED8: the hooked instruction, EU form"
+  ]
+ },
+ {
+  "id": "damage",
+  "name": "Damage Numbers",
+  "description": "Shows the damage of every hit over the monster.",
+  "default": true,
+  "base": 165873120,
+  "size": 1240,
+  "entries": [
+   165873120,
+   165873316,
+   165873504,
+   165874352
+  ],
+  "hooks": [
+   {
+    "addr": 142876084,
+    "unit": "eboot",
+    "orig": 237017523,
+    "word": 175686104,
+    "kind": "j",
+    "target": 165873504
+   },
+   {
+    "addr": 143037468,
+    "unit": "eboot",
+    "orig": 65011720,
+    "word": 175686316,
+    "kind": "j",
+    "target": 165874352
+   },
+   {
+    "addr": 163858332,
+    "unit": "game_sub",
+    "orig": null,
+    "word": 604176392,
+    "kind": "word"
+   },
+   {
+    "addr": 162298260,
+    "unit": "game_task",
+    "orig": null,
+    "word": 175686008,
+    "kind": "j",
+    "target": 165873120
+   },
+   {
+    "addr": 162957592,
+    "unit": "game_task",
+    "orig": null,
+    "word": 175686057,
+    "kind": "j",
+    "target": 165873316
+   }
+  ],
+  "returns": [
+   142876092,
+   143201100,
+   162298264,
+   162957596
+  ],
+  "notes": []
+ },
+ {
+  "id": "gathering",
+  "name": "Gathering Node Indicators",
+  "description": "Marks the gathering points of the area on the screen.",
+  "default": true,
+  "base": 165941520,
+  "size": 1756,
+  "entries": [
+   60441088,
+   60441216,
+   60441344,
+   60441472,
+   165941520
+  ],
+  "hooks": [
+   {
+    "addr": 142892260,
+    "unit": "eboot",
+    "orig": 1006766228,
+    "word": 175703108,
+    "kind": "j",
+    "target": 165941520
+   },
+   {
+    "addr": 142892264,
+    "unit": "eboot",
+    "orig": 2487596648,
+    "word": 0,
+    "kind": "word"
+   }
+  ],
+  "returns": [
+   142892268
+  ],
+  "notes": [
+   "089215E0: the hooked instruction, EU form"
+  ]
+ }
+]
