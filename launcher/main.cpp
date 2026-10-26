@@ -538,12 +538,17 @@ static void page_play(float w, float h) {
     }
     ImGui::SetCursorPosX(lw);
     if (ImGui::Checkbox("Fullscreen", &g_cfg.fullscreen)) changed();
+    ImGui::SameLine();
+    if (ImGui::Checkbox("60 FPS (beta)", &g_cfg.fps60)) changed();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("The game at 60 frames a second. In a room everyone plays at the slowest player's rate.\n"
+                          "Beta: tell PateeerQ if something runs too fast or too slow. F4 in game toggles it.");
     label("Hunter name");
     ImGui::SetNextItemWidth(width - lw);
     if (ImGui::InputTextWithHint("##nick", "multiplayer name", &g_cfg.nick)) changed();
     ImGui::PushFont(g_small);
     ImGui::SetCursorPosX(lw);
-    ImGui::TextColored(C_DIM, "F11 or Alt+Enter: fullscreen in game");
+    ImGui::TextColored(C_DIM, "F11 or Alt+Enter: fullscreen in game  \xC2\xB7  F4: 60 FPS");
     ImGui::PopFont();
     ImGui::EndChild();
 
