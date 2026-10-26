@@ -6,7 +6,7 @@
 #define MHFU_ABOUT_H
 
 #define MHFU_APP_NAME   "Monster Hunter: Freedom Unite Recomp"
-#define MHFU_VERSION    "0.3.0"
+#define MHFU_VERSION    "0.3.1"
 #define MHFU_MAINTAINER "PateeerQ"
 #define MHFU_REPO       "PateeerQ/FreedomUniteRecomp"
 #define MHFU_REPO_URL   "https://github.com/" MHFU_REPO
