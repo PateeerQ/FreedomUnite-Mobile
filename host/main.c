@@ -645,6 +645,7 @@ int main(int argc, char **argv) {
             return 1;
         }
     }
+    mhfu_mods_boot();             /* the built-in code mods (mods.c), with the EBOOT in memory */
     printf("free user memory   %u KB\n", psp_sysmem_free() / 1024);
 
     /* Boot thread: stack from the top of memory, a zeroed $k0 block at its top
