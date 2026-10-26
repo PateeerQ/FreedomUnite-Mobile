@@ -16,6 +16,7 @@
 #include "game.h"
 #include "image.h"
 #include "keys.h"
+#include "mods.h"
 #include "online.h"
 
 #include <SDL3/SDL.h>
@@ -265,8 +266,8 @@ static bool depart_button(const char *label, const char *sub, ImVec2 size, bool 
 
 // ---- state ---------------------------------------------------------------------
 
-enum Page { PLAY, ACHIEVEMENTS, KEYBOARD, CONTROLLER, ADVANCED, LOG, ABOUT, NPAGES };
-static const char *k_pages[NPAGES] = {"Play", "Achievements", "Keyboard", "Controller", "Advanced", "Log", "About"};
+enum Page { PLAY, MODS, ACHIEVEMENTS, KEYBOARD, CONTROLLER, ADVANCED, LOG, ABOUT, NPAGES };
+static const char *k_pages[NPAGES] = {"Play", "Mods", "Achievements", "Keyboard", "Controller", "Advanced", "Log", "About"};
 
 static Config g_cfg;
 static bool g_dirty;
@@ -294,7 +295,7 @@ static void changed() { g_dirty = true; }
 // The file dialog answers on whichever thread SDL likes.
 static std::mutex g_pick_lock;
 static std::string g_pick_result;
-static int g_pick_target;           // 1 ISO, 2 EBOOT
+static int g_pick_target;           // 1 ISO, 2 EBOOT, 3 a cheat file to import
 static void SDLCALL picked(void *, const char *const *files, int) {
     std::lock_guard<std::mutex> l(g_pick_lock);
     if (files && files[0]) g_pick_result = files[0];
@@ -572,7 +573,12 @@ static void page_play(float w, float h) {
     static bool was_running;
     if (was_running && !running) {
         Config now;
-        if (config_load(now)) { g_cfg.volume = now.volume; g_cfg.mouse_sens = now.mouse_sens; }
+        if (config_load(now)) {
+            g_cfg.volume = now.volume;
+            g_cfg.mouse_sens = now.mouse_sens;
+            g_cfg.widescreen = now.widescreen;
+            g_cfg.mods = now.mods;
+        }
     }
     was_running = running;
     ImGui::BeginGroup();
@@ -1068,6 +1074,96 @@ static void page_advanced(float w, float) {
     ImGui::EndChild();
 }
 
+// ---- Mods ---------------------------------------------------------------------------------
+
+static void page_mods(float w, float) {
+    ImGui::SetCursorPos(ImVec2(30, 24));
+    ImGui::BeginChild("mods", ImVec2(w - 60, -20));
+    page_title("Mods", "Built into the game, and your own cheats. The game picks changes to cheats up while it runs; "
+                       "built-in mods and Widescreen at the next start (or from the game window's Options menu).");
+    begin_panel("modsp", ImVec2(0, 0));
+
+    heading("Built-in mods");
+    for (int i = 0; i < k_nbuiltin_mods; i++) {
+        const BuiltinMod &m = k_builtin_mods[i];
+        auto it = g_cfg.mods.find(m.id);
+        bool on = it == g_cfg.mods.end() ? true : it->second;
+        ImGui::PushID(i);
+        if (ImGui::Checkbox(m.name, &on)) { g_cfg.mods[m.id] = on; changed(); }
+        ImGui::PopID();
+        ImGui::PushFont(g_small);
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 34);
+        dim("%s", m.description);
+        ImGui::PopFont();
+    }
+    ImGui::PushFont(g_small);
+    dim("Community mods for the US game, moved to this (EU) version and recompiled with it.");
+    ImGui::PopFont();
+    ImGui::Spacing();
+
+    heading("Display");
+    if (ImGui::Checkbox("Widescreen: fill the window", &g_cfg.widescreen)) changed();
+    ImGui::PushFont(g_small);
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 34);
+    dim("The camera takes the window's shape and the picture is stretched over it (with an Output wider than 16:9).");
+    ImGui::PopFont();
+    if (ImGui::Checkbox("60 FPS (beta)", &g_cfg.fps60)) changed();
+    ImGui::Spacing();
+
+    heading("Cheats");
+    const std::string path = cheats_path(paths::profile_root(g_cfg.profile));
+    std::string msg;
+    const CheatJob job = cheats_download_state(msg);
+    if (job == CheatJob::Busy) ImGui::BeginDisabled();
+    if (ImGui::Button("Get the cheat list")) cheats_download_start(path);
+    if (job == CheatJob::Busy) ImGui::EndDisabled();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("ULES-01213's cheats from the CWCheat Database Plus (the one PPSSPP uses).");
+    ImGui::SameLine();
+    if (ImGui::Button("Import a cheat file")) pick(3, "Cheats (CWCheat)", "ini;db;txt");
+    ImGui::SameLine();
+    if (ImGui::Button("Open the cheat file")) {
+        if (!file_exists(path)) { std::string err; cheats_import(path, "_C0 (your cheats)\n", err); }
+        open_in_shell(path);
+    }
+    if (!msg.empty()) ImGui::TextColored(job == CheatJob::Failed ? C_WARN : C_DIM, "%s", msg.c_str());
+    ImGui::PushFont(g_small);
+    dim("Cheats pause while you are in a room, and achievements do not unlock while one is on. "
+        "Cheats that change the game's code cannot work here and are greyed out.");
+    ImGui::PopFont();
+    ImGui::Spacing();
+
+    static std::vector<Cheat> cheats;
+    static int64_t stamp = -1;
+    std::error_code e;
+    const int64_t now = fs::exists(fs::u8path(path), e) ? (int64_t)fs::last_write_time(fs::u8path(path), e).time_since_epoch().count() : 0;
+    if (now != stamp) { cheats = cheats_load(path); stamp = now; }
+    if (cheats.empty()) dim("No cheats yet: get the list or import a file.");
+    for (size_t i = 0; i < cheats.size(); i++) {
+        Cheat &c = cheats[i];
+        ImGui::PushID((int)i);
+        if (c.header) {
+            ImGui::TextColored(C_GOLD, "%s", c.name.c_str());
+        } else if (c.writes_code) {
+            ImGui::BeginDisabled();
+            bool off = false;
+            ImGui::Checkbox(c.name.c_str(), &off);
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Changes the game's code: no effect on the recompiled game.");
+        } else {
+            bool on = c.on;
+            if (ImGui::Checkbox(c.name.c_str(), &on)) {
+                std::string err;
+                if (cheats_set(path, c, on, err)) c.on = on;
+                else g_status = err;
+            }
+        }
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+    ImGui::EndChild();
+}
+
 // ---- Log -------------------------------------------------------------------------------------
 
 static void page_about(float w, float) {
@@ -1247,10 +1343,16 @@ int main(int, char **) {
         {
             std::lock_guard<std::mutex> l(g_pick_lock);
             if (!g_pick_result.empty()) {
-                (g_pick_target == 1 ? g_cfg.iso : g_cfg.eboot) = g_pick_result;
+                if (g_pick_target == 3) {
+                    std::string err;
+                    const int n = cheats_import(cheats_path(paths::profile_root(g_cfg.profile)), read_text(g_pick_result), err);
+                    g_status = n < 0 ? "Import: " + err : "Imported " + std::to_string(n) + " cheats.";
+                } else {
+                    (g_pick_target == 1 ? g_cfg.iso : g_cfg.eboot) = g_pick_result;
+                    changed();
+                    g_recheck = true;
+                }
                 g_pick_result.clear();
-                changed();
-                g_recheck = true;
             }
         }
         bool reset = false;
@@ -1278,6 +1380,7 @@ int main(int, char **) {
         ImGui::BeginChild("content", ImVec2(cw, ch), ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar);
         switch (g_page) {
         case PLAY: page_play(cw, ch); break;
+        case MODS: page_mods(cw, ch); break;
         case ACHIEVEMENTS: page_achievements(cw, ch); break;
         case KEYBOARD: page_keyboard(cw, ch); break;
         case CONTROLLER: page_controller(cw, ch); break;
