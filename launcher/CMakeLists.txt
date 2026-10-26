@@ -17,7 +17,7 @@ FetchContent_Declare(json
 FetchContent_MakeAvailable(json)
 
 add_executable(mhfu_launcher WIN32
-    main.cpp config.cpp game.cpp http.cpp keys.cpp online.cpp image.cpp
+    main.cpp config.cpp game.cpp http.cpp keys.cpp mods.cpp online.cpp image.cpp
     ${imgui_SOURCE_DIR}/imgui.cpp ${imgui_SOURCE_DIR}/imgui_draw.cpp
     ${imgui_SOURCE_DIR}/imgui_tables.cpp ${imgui_SOURCE_DIR}/imgui_widgets.cpp
     ${imgui_SOURCE_DIR}/imgui_demo.cpp
