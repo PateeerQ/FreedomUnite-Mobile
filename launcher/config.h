@@ -19,6 +19,8 @@ struct Config {
     int  render_scale = 2;              // the GE's internal resolution: 480x272 times this
     std::string output = "960x544";     // the window's client size, "WxH"
     bool fullscreen = false;
+    int  volume = 100;
+    int  mouse_sens = 100;              // the mouse camera's sensitivity, percent (MHFU_MOUSE_SENS)                  // the game's master volume, percent (MHFU_VOLUME)
     bool fps60 = false;                 // the 60 fps mode (MHFU_FPS=60; in a room, as the room allows)
     std::string nick;                   // multiplayer name (--nick); empty: net.cfg's
     std::string gamepad;                // "": the first connected, "none": keyboard only, else an SDL GUID
