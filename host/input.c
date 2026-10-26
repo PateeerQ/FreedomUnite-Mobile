@@ -24,6 +24,7 @@
 #include "chat.h"
 #include "gamepad.h"
 #include "input.h"
+#include "mods.h"
 #include "window.h"
 
 #define HOLD_FRAMES 6
@@ -148,6 +149,7 @@ static void hle_ReadBufferPositive(void) {
     uint8_t ax = 128, ay = 128;
     uint32_t buttons = script_buttons(frame) | mhfu_window_buttons(&ax, &ay);
     buttons |= mhfu_gamepad_read(&ax, &ay);
+    mhfu_cheats_frame(buttons);          /* the player's cheats (mods.c), with the buttons for joker codes */
     buttons = mhfu_chat_buttons(buttons, &ax, &ay);   /* Select is the room chat's while in a room */
     if (buttons & DUMP_BIT) {
         if (!(script_buttons(frame - 1) & DUMP_BIT)) psp_ge_dump_next(2);   /* once per press */
