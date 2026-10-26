@@ -1,0 +1,275 @@
+diff --git a/include/psprecomp/render.h b/include/psprecomp/render.h
+index 102f5f6..77211d8 100644
+--- a/include/psprecomp/render.h
++++ b/include/psprecomp/render.h
+@@ -159,6 +159,14 @@ void psp_render_gl_overlay(const uint32_t *rgba, int w, int h);
+  * phone's touch controls cover the screen, and are drawn at half its size. */
+ void psp_render_gl_overlay_scaled(const uint32_t *rgba, int w, int h, int dst_w, int dst_h);
+ 
++/* In-between frames: a game that draws at 30 frames a second is shown at 60.
++ * Each frame is shown after one made from it and the frame before (every
++ * vertex of a draw both frames share halfway between them), half a frame
++ * apart. The game's own pace and logic are unchanged; what is seen is half a
++ * game frame later. Any time, from any thread. */
++void psp_render_gl_set_interpolation(int on);
++int  psp_render_gl_interpolation(void);
++
+ /* Pixels written by the active backend -- the proof of life during bring-up. */
+ uint64_t psp_render_pixels(void);
+ /* Fragments depth-tested, rejected by the test, and depth pixels cleared.
+diff --git a/src/render_gl.c b/src/render_gl.c
+index 91540a5..06a1d72 100644
+--- a/src/render_gl.c
++++ b/src/render_gl.c
+@@ -31,6 +31,7 @@
+ 
+ #include "hle/host_thread.h"
+ 
++#include <math.h>
+ #include <stddef.h>
+ #include <stdint.h>
+ #include <stdio.h>
+@@ -1136,16 +1137,25 @@ static void present(const c_present *c) {
+     g_applied_valid = 0;
+ }
+ 
+-static void play(gframe *f) {
++/* What play() runs: an ordinary frame runs everything; one shown with an
++ * in-between frame first makes its textures and framebuffers, then draws
++ * twice (the in-between vertices, then its own), then frees. */
++enum { PLAY_MAKE = 1, PLAY_DRAW = 2, PLAY_FREE = 4, PLAY_PRESENT = 8, PLAY_ALL = 15 };
++
++static void play(gframe *f, int what, const gbuf *vtx) {
+     glUseProgram(g_prog);
+     glBindVertexArray(g_vao);
+     glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
+-    if (f->vtx.n) glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)f->vtx.n, f->vtx.p, GL_STREAM_DRAW);
++    if ((what & PLAY_DRAW) && vtx->n) glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)vtx->n, vtx->p, GL_STREAM_DRAW);
+     g_applied_valid = 0;
+ 
+     for (size_t at = 0; at < f->cmd.n; ) {
+-        const chead *h = (const chead *)(f->cmd.p + at);
++        chead *h = (chead *)(f->cmd.p + at);
+         at += h->size;
++        const int kind = h->op == C_FB_NEW || h->op == C_TEX_NEW ? PLAY_MAKE
++                       : h->op == C_FB_FREE || h->op == C_TEX_FREE ? PLAY_FREE
++                       : h->op == C_PRESENT ? PLAY_PRESENT : PLAY_DRAW;
++        if (!(what & kind)) continue;
+         switch (h->op) {
+         case C_FB_NEW: {
+             const c_fb_new *c = (const c_fb_new *)h;
+@@ -1155,7 +1165,7 @@ static void play(gframe *f) {
+         case C_FB_FREE: fb_free(((const c_id *)h)->id); break;
+         case C_FB_BIND: fb_bind(((const c_id *)h)->id); break;
+         case C_TEX_NEW: {
+-            const c_tex_new *c = (const c_tex_new *)h;
++            c_tex_new *c = (c_tex_new *)h;
+             g_rtex = (GLuint *)grow(g_rtex, &g_nrtex, c->id, sizeof *g_rtex);
+             if (!g_rtex[c->id]) g_rtex[c->id] = new_texture(c->w, c->hgt, c->pixels, GL_NEAREST);
+             else {
+@@ -1163,6 +1173,7 @@ static void play(gframe *f) {
+                 glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, c->w, c->hgt, 0, GL_RGBA, GL_UNSIGNED_BYTE, c->pixels);
+             }
+             free(c->pixels);
++            c->pixels = NULL;                /* made once, even when the frame is played twice */
+             g_applied_valid = 0;             /* the texture binding moved */
+             break;
+         }
+@@ -1187,6 +1198,175 @@ static void play(gframe *f) {
+     }
+ }
+ 
++/* ---- in-between frames (psp_render_gl_set_interpolation) ---------------------
++ *
++ * The GE side hands over a frame and records the next meanwhile; the render
++ * thread copies the frame (so the GE side need not wait for both showings)
++ * and, when the frame before it was a drawn one too, shows first a frame made
++ * from the two: each of this frame's draws that the previous frame also had
++ * (same framebuffer, same state, as many vertices, found in the same order)
++ * gets every vertex halfway between its two positions. Draws with no
++ * counterpart, and draws whose vertices jump far (a particle slot reused),
++ * keep this frame's vertices. Half a frame later this frame itself is shown.
++ * When too little matches (a cut, a new scene), when a frame came late
++ * (loading), or when the frame is shown from memory (a movie), it is shown
++ * alone, at once. */
++
++static volatile int g_interp;
++void psp_render_gl_set_interpolation(int on) { g_interp = on ? 1 : 0; }
++int  psp_render_gl_interpolation(void) { return g_interp; }
++
++typedef struct { int32_t fb; gstate s; uint32_t first, count; } idraw;
++
++static gframe   g_cur;                       /* the render thread's copy of the frame */
++static gbuf     g_ivtx;                      /* its in-between vertices */
++static gbuf     g_prev_vtx;                  /* the previous frame's vertices */
++static idraw   *g_prev;                      /* and its draws */
++static size_t   g_nprev, g_capprev;
++static int      g_have_prev;
++static uint64_t g_last_arrival, g_interval_us = 33367;
++static uint64_t g_smooth_frames, g_alone_frames, g_moved, g_kept;
++static uint64_t g_why_noprev, g_why_nopresent, g_why_memory, g_why_late, g_why_few;   /* frames shown alone */
++static host_mutex g_sleep_m = HOST_MUTEX_INIT;
++static host_cond  g_sleep_cv = HOST_COND_INIT;
++
++static void gbuf_copy(gbuf *to, const gbuf *from) {
++    to->n = 0;
++    if (from->n) memcpy(gbuf_add(to, from->n), from->p, from->n);
++}
++
++static const c_present *find_present(const gframe *f) {
++    const c_present *p = NULL;
++    for (size_t at = 0; at < f->cmd.n; ) {
++        const chead *h = (const chead *)(f->cmd.p + at);
++        at += h->size;
++        if (h->op == C_PRESENT) p = (const c_present *)h;
++    }
++    return p;
++}
++
++/* This frame's draws, with the framebuffer each went to, for the next frame. */
++static void remember(const gframe *f) {
++    gbuf_copy(&g_prev_vtx, &f->vtx);
++    g_nprev = 0;
++    int32_t fb = -1;
++    for (size_t at = 0; at < f->cmd.n; ) {
++        const chead *h = (const chead *)(f->cmd.p + at);
++        at += h->size;
++        if (h->op == C_FB_BIND) fb = ((const c_id *)h)->id;
++        if (h->op != C_DRAW) continue;
++        if (g_nprev == g_capprev) {
++            g_capprev = g_capprev ? g_capprev * 2 : 1024;
++            g_prev = (idraw *)realloc(g_prev, g_capprev * sizeof *g_prev);
++            if (!g_prev) { fputs("render_gl: out of memory\n", stderr); abort(); }
++        }
++        const c_draw *d = (const c_draw *)h;
++        g_prev[g_nprev].fb = fb;
++        g_prev[g_nprev].s = d->s;
++        g_prev[g_nprev].first = d->first;
++        g_prev[g_nprev].count = d->count;
++        g_nprev++;
++    }
++}
++
++static float ndc(float c, float w) { return w != 0.0f ? c / w : c; }
++
++/* The in-between vertices of `f` into g_ivtx; the share of vertices that moved
++ * from a counterpart (0..1). */
++static float make_between(const gframe *f) {
++    gbuf_copy(&g_ivtx, &f->vtx);
++    gvert *out = (gvert *)g_ivtx.p;
++    const gvert *old = (const gvert *)g_prev_vtx.p;
++    size_t cursor = 0, total = 0, matched = 0;
++    int32_t fb = -1;
++    for (size_t at = 0; at < f->cmd.n; ) {
++        const chead *h = (const chead *)(f->cmd.p + at);
++        at += h->size;
++        if (h->op == C_FB_BIND) fb = ((const c_id *)h)->id;
++        if (h->op != C_DRAW) continue;
++        const c_draw *d = (const c_draw *)h;
++        total += d->count;
++        /* Its counterpart: the next draw of the previous frame like it, not far on. */
++        const idraw *e = NULL;
++        for (size_t j = cursor, k = 0; j < g_nprev && k < 64; j++, k++)
++            if (g_prev[j].fb == fb && g_prev[j].count == d->count && !memcmp(&g_prev[j].s, &d->s, sizeof d->s)) {
++                e = &g_prev[j];
++                cursor = j + 1;
++                break;
++            }
++        if (!e) continue;
++        const gvert *a = old + e->first;
++        gvert *b = out + d->first;
++        /* A vertex that jumps more than an eighth of the screen is another
++         * thing in the same slot: the whole draw keeps this frame's. */
++        int jump = 0;
++        for (uint32_t i = 0; i < d->count && !jump; i++) {
++            if ((a[i].w > 0) != (b[i].w > 0)) jump = 1;
++            else if (fabsf(ndc(a[i].x, a[i].w) - ndc(b[i].x, b[i].w)) > 0.25f ||
++                     fabsf(ndc(a[i].y, a[i].w) - ndc(b[i].y, b[i].w)) > 0.25f) jump = 1;
++        }
++        if (jump) continue;
++        for (uint32_t i = 0; i < d->count; i++) {
++            b[i].x = (a[i].x + b[i].x) * 0.5f;
++            b[i].y = (a[i].y + b[i].y) * 0.5f;
++            b[i].z = (a[i].z + b[i].z) * 0.5f;
++            b[i].w = (a[i].w + b[i].w) * 0.5f;
++            b[i].fog = (a[i].fog + b[i].fog) * 0.5f;
++            /* Scrolling textures move; a texture that flips frames does not blend. */
++            if (fabsf(a[i].u - b[i].u) < 0.1f && fabsf(a[i].v - b[i].v) < 0.1f) {
++                b[i].u = (a[i].u + b[i].u) * 0.5f;
++                b[i].v = (a[i].v + b[i].v) * 0.5f;
++            }
++        }
++        matched += d->count;
++    }
++    g_moved += matched;
++    g_kept += total - matched;
++    return total ? (float)matched / (float)total : 0.0f;
++}
++
++static void sleep_until(uint64_t deadline) {
++    host_mutex_lock(&g_sleep_m);
++    while (host_deadline_us() < deadline && !host_cond_until(&g_sleep_cv, &g_sleep_m, deadline)) { }
++    host_mutex_unlock(&g_sleep_m);
++}
++
++static void play_smooth(gframe *f) {
++    const uint64_t now = host_deadline_us();
++    const uint64_t since = g_last_arrival ? now - g_last_arrival : 0;
++    g_last_arrival = now;
++    if (since >= 20000 && since <= 50000) g_interval_us = (g_interval_us * 7 + since) / 8;
++
++    const c_present *p = find_present(f);
++    int between = 0;
++    if (!p) g_why_nopresent++;
++    else if (p->fb < 0) g_why_memory++;
++    else if (!g_have_prev) g_why_noprev++;
++    else if (since > 60000) g_why_late++;
++    else if (make_between(f) < 0.5f) g_why_few++;
++    else between = 1;
++    if (between) {
++        play(f, PLAY_MAKE, &f->vtx);
++        play(f, PLAY_DRAW | PLAY_PRESENT, &g_ivtx);             /* the in-between frame, now */
++        sleep_until(now + g_interval_us / 2);
++        play(f, PLAY_DRAW | PLAY_FREE | PLAY_PRESENT, &f->vtx);   /* and this frame, half a frame on */
++        g_smooth_frames++;
++    } else {
++        play(f, PLAY_ALL, &f->vtx);
++        g_alone_frames++;
++    }
++    g_have_prev = p && p->fb >= 0;
++    if (g_have_prev) remember(f);
++    if (((g_smooth_frames + g_alone_frames) % 600) == 0)
++        fprintf(stderr, "render_gl: in-between frames for %llu of the last 600 frames, %.0f%% of vertices moved "
++                "(alone: %llu no present, %llu from memory, %llu after one, %llu late, %llu too different)\n",
++                (unsigned long long)g_smooth_frames, g_moved + g_kept ? 100.0 * (double)g_moved / (double)(g_moved + g_kept) : 0.0,
++                (unsigned long long)g_why_nopresent, (unsigned long long)g_why_memory, (unsigned long long)g_why_noprev,
++                (unsigned long long)g_why_late, (unsigned long long)g_why_few),
++        g_smooth_frames = g_alone_frames = g_moved = g_kept = 0,
++        g_why_nopresent = g_why_memory = g_why_noprev = g_why_late = g_why_few = 0;
++}
++
+ static void *render_thread(void *arg) {
+     (void)arg;
+     const int r = setup();
+@@ -1202,7 +1382,20 @@ static void *render_thread(void *arg) {
+         gframe *f = &g_frames[g_pending];
+         host_mutex_unlock(&g_m);
+ 
+-        play(f);
++        if (g_interp) {
++            /* A copy, and the GE side goes on: showing two frames takes the
++             * time the game spends on its next one. */
++            gbuf_copy(&g_cur.cmd, &f->cmd);
++            gbuf_copy(&g_cur.vtx, &f->vtx);
++            host_mutex_lock(&g_m);
++            g_pending = -1;
++            host_cond_broadcast(&g_cv);
++            host_mutex_unlock(&g_m);
++            play_smooth(&g_cur);
++            continue;
++        }
++        g_have_prev = 0;
++        play(f, PLAY_ALL, &f->vtx);
+ 
+         host_mutex_lock(&g_m);
+         g_pending = -1;
