@@ -32,11 +32,11 @@ REPO = os.path.dirname(HERE)
 # The mods: folder name prefix -> (id, name, description, relocation delta)
 MODS = [
     ("Target Camera", "targetcam", "Target Camera + Crosshair",
-     "Hold L to look at the large monster; a crosshair for bowguns.", 0x01500000),
+     "Community mod: Target Camera Mod v0.7, with its crosshair.", 0x01500000),
     ("Damage Numbers", "damage", "Damage Numbers",
-     "Shows the damage of every hit over the monster.", 0x01510000),
+     "Community mod: Damage Numbers Display v0.4.", 0x01510000),
     ("Gathering Nodes", "gathering", "Gathering Node Indicators",
-     "Marks the gathering points of the area on the screen.", 0x01520000),
+     "Community mod: Gathering Nodes Mod v0.4.", 0x01520000),
 ]
 OWN_LO, OWN_HI = 0x0891F000, 0x08922000          # where the US mods put their code and data
 
@@ -168,10 +168,12 @@ def convert(folder, mid, name, desc, delta):
             if word >> 26 == 2 and OWN_LO <= t < OWN_HI:
                 entries.add(t)
     code = set()
+    walked = set()           # not `code`: a delay slot is code before anything walks on from it
     todo = sorted(entries)
     while todo:
         pc = todo.pop()
-        while own(pc) and pc not in code and lo <= pc < hi:
+        while own(pc) and pc not in walked and lo <= pc < hi:
+            walked.add(pc)
             code.add(pc)
             w = w32(pc)
             op = w >> 26

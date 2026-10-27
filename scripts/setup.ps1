@@ -173,7 +173,9 @@ if (-not $ovlTool) { throw "mhfu_ovl.exe not found under $build" }
 
 $seen = @{}
 $table = @()
-# The built-in code mods (tools/mods_convert.py) are recompiled the same way.
+# The built-in code mods (tools/mods_convert.py) are recompiled the same way
+# (an older conversion's copies out first: their hashes changed).
+Get-ChildItem $ovlSrc -Filter "mod_*.bin" | Remove-Item -Force
 foreach ($mod in Get-ChildItem (Join-Path $repo "mods\builtin") -Filter *.bin -ErrorAction SilentlyContinue) {
     Copy-Item -Force $mod.FullName (Join-Path $ovlSrc ("mod_" + $mod.Name))
 }

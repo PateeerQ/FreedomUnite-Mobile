@@ -1,0 +1,55 @@
+diff --git a/include/psprecomp/hle.h b/include/psprecomp/hle.h
+index 3753b71..7f7202f 100644
+--- a/include/psprecomp/hle.h
++++ b/include/psprecomp/hle.h
+@@ -306,6 +306,9 @@ uint32_t psp_sysmem_free(void);
+  * guest ever refers to them. */
+ uint32_t psp_sysmem_alloc(uint32_t size, int from_high);
+ void     psp_sysmem_release(uint32_t addr);
++/* A fixed range kept from the game (the host's own code and data there, e.g.
++ * built-in mods). Returns addr, or 0 when it is taken or outside the heap. */
++uint32_t psp_sysmem_reserve(uint32_t addr, uint32_t size, const char *name);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/include/psprecomp/render.h b/include/psprecomp/render.h
+index 77211d8..2b07067 100644
+--- a/include/psprecomp/render.h
++++ b/include/psprecomp/render.h
+@@ -167,6 +167,11 @@ void psp_render_gl_overlay_scaled(const uint32_t *rgba, int w, int h, int dst_w,
+ void psp_render_gl_set_interpolation(int on);
+ int  psp_render_gl_interpolation(void);
+ 
++/* The picture stretched over the whole window instead of letterboxed at the
++ * PSP's aspect (for a game told to draw wider: a widescreen hack). Any time,
++ * from any thread. */
++void psp_render_gl_set_stretch(int on);
++
+ /* Pixels written by the active backend -- the proof of life during bring-up. */
+ uint64_t psp_render_pixels(void);
+ /* Fragments depth-tested, rejected by the test, and depth pixels cleared.
+diff --git a/src/hle/sysmem.c b/src/hle/sysmem.c
+index b084e6e..dfafa03 100644
+--- a/src/hle/sysmem.c
++++ b/src/hle/sysmem.c
+@@ -140,6 +140,20 @@ uint32_t psp_sysmem_alloc(uint32_t size, int from_high) {
+     return addr;
+ }
+ 
++uint32_t psp_sysmem_reserve(uint32_t addr, uint32_t size, const char *name) {
++    uint32_t rounded = (size + 0xFF) & ~0xFFu;
++    if ((addr & 0xFF) || addr < g_heap_lo || addr + rounded > g_heap_hi || overlaps(addr, rounded)) return 0;
++    mem_block *b = alloc_slot();
++    if (!b) return 0;
++    b->uid = g_next_uid++;
++    b->addr = addr;
++    b->size = rounded;
++    b->used = 1;
++    snprintf(b->name, sizeof b->name, "%s", name ? name : "reserved");
++    fprintf(stderr, "AllocPartition -> 0x%08X size %u reserved (%s)\n", addr, rounded, b->name);
++    return addr;
++}
++
+ void psp_sysmem_release(uint32_t addr) {
+     for (int i = 0; i < MAX_BLOCKS; i++)
+         if (g_block[i].used && g_block[i].addr == addr) { g_block[i].used = 0; return; }

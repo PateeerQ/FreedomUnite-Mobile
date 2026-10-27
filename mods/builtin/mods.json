@@ -2,7 +2,7 @@
  {
   "id": "targetcam",
   "name": "Target Camera + Crosshair",
-  "description": "Hold L to look at the large monster; a crosshair for bowguns.",
+  "description": "Community mod: Target Camera Mod v0.7, with its crosshair.",
   "default": true,
   "base": 165803520,
   "size": 6656,
@@ -38,12 +38,12 @@
    "0891F9FC: through the game's register, EU offset -0x23d6",
    "0891FED8: the hooked instruction, EU form"
   ],
-  "overlay": "942ABBEB"
+  "overlay": "4E85E258"
  },
  {
   "id": "damage",
   "name": "Damage Numbers",
-  "description": "Shows the damage of every hit over the monster.",
+  "description": "Community mod: Damage Numbers Display v0.4.",
   "default": true,
   "base": 165873120,
   "size": 1240,
@@ -106,12 +106,12 @@
    162957656
   ],
   "notes": [],
-  "overlay": "3640D0AA"
+  "overlay": "63F375B0"
  },
  {
   "id": "gathering",
   "name": "Gathering Node Indicators",
-  "description": "Marks the gathering points of the area on the screen.",
+  "description": "Community mod: Gathering Nodes Mod v0.4.",
   "default": true,
   "base": 165941520,
   "size": 1756,
@@ -145,6 +145,6 @@
   "notes": [
    "089215E0: the hooked instruction, EU form"
   ],
-  "overlay": "7267DB36"
+  "overlay": "422CBF3B"
  }
 ]

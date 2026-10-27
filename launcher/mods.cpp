@@ -13,9 +13,9 @@
 namespace fs = std::filesystem;
 
 const BuiltinMod k_builtin_mods[] = {
-    {"targetcam", "Target Camera + Crosshair", "Hold L to look at the large monster; a crosshair for bowguns."},
-    {"damage", "Damage Numbers", "Shows the damage of every hit over the monster."},
-    {"gathering", "Gathering Node Indicators", "Marks the gathering points of the area on the screen."},
+    {"targetcam", "Target Camera + Crosshair", "Community mod: Target Camera Mod v0.7, with its crosshair."},
+    {"damage", "Damage Numbers", "Community mod: Damage Numbers Display v0.4."},
+    {"gathering", "Gathering Node Indicators", "Community mod: Gathering Nodes Mod v0.4."},
 };
 const int k_nbuiltin_mods = (int)(sizeof k_builtin_mods / sizeof k_builtin_mods[0]);
 

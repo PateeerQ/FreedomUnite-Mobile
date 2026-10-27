@@ -1,0 +1,47 @@
+diff --git a/tools/allegrexrecomp/emit.c b/tools/allegrexrecomp/emit.c
+index 1536bc2..2b14846 100644
+--- a/tools/allegrexrecomp/emit.c
++++ b/tools/allegrexrecomp/emit.c
+@@ -618,6 +618,20 @@ static void branch_cond(char *buf, size_t n, const a_insn *in) {
+  * target. `falls_through` says whether the construct just emitted can reach
+  * the next address by falling through — if so it must jump past this copy
+  * rather than running it a second time. */
++/* Control leaving a slot alias for `after`, an address another body holds:
++ * continue there as the hardware does (see the fall-through at a body's end). */
++static void emit_slot_fall_out(ectx *c, uint32_t after) {
++    const a_analysis *an = c->an;
++    if (is_function(an, after)) {
++        fprintf(c->out, "    psp_func_%08X();\n", after);
++    } else if (after < an->base + an->size && an->owner[widx(an, after)] != A_NO_OWNER &&
++               !c->is_slot[widx(an, after)] && c->is_label[widx(an, after)]) {
++        fprintf(c->out, "    psp_at_%08X();\n", after);
++    }
++    /* else no body names it: the silent return, as at a body's end */
++    fprintf(c->out, "    return;\n");
++}
++
+ static void emit_slot_alias(ectx *c, uint32_t a, const a_insn *slot, int falls_through) {
+     const a_analysis *an = c->an;
+     const uint32_t owner = c->func->addr;
+@@ -625,12 +639,20 @@ static void emit_slot_alias(ectx *c, uint32_t a, const a_insn *slot, int falls_t
+ 
+     if (falls_through) {
+         if (owned_by(an, after, owner)) { note_goto(c, after); fprintf(c->out, "    goto L_%08X;\n", after); }
+-        else                            fprintf(c->out, "    return;\n");
++        else                            emit_slot_fall_out(c, after);
+     }
+     note_label(c, a + 4);
+     fprintf(c->out, "L_%08X:\n", a + 4);
+     comment(c, slot);
+     emit_simple(c, slot, "    ");
++    /* A branch to the slot of a jump runs the slot and then whatever follows
++     * it, not the jump. When that is this body's next instruction the walk
++     * emits it next; when the body ends there, the C function would end too
++     * and return. Measured on MHFU's Gathering Nodes mod: three branches to the
++     * slot of `j 0x09E411E0` at the end of a body returned from the mod with
++     * its 12-byte frame held, and the hooked 0x08845C68 returned 60 bytes low
++     * without its epilogue: $ra 0 and a dispatch miss in every quest. */
++    if (!falls_through && !owned_by(an, after, owner)) emit_slot_fall_out(c, after);
+ }
+ 
+ /* ---- one function -------------------------------------------------------- */

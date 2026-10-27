@@ -559,7 +559,9 @@ static void page_play(float w, float h) {
     if (ImGui::InputTextWithHint("##nick", "multiplayer name", &g_cfg.nick)) changed();
     ImGui::PushFont(g_small);
     ImGui::SetCursorPosX(lw);
-    ImGui::TextColored(C_DIM, "F11 or Alt+Enter: fullscreen in game  \xC2\xB7  F4: 60 FPS  \xC2\xB7  F5/F6: volume  \xC2\xB7  F7: mouse look");
+    ImGui::PushStyleColor(ImGuiCol_Text, C_DIM);
+    ImGui::TextWrapped("F11 or Alt+Enter: fullscreen in game  \xC2\xB7  F4: 60 FPS  \xC2\xB7  F5/F6: volume  \xC2\xB7  F7: mouse look");
+    ImGui::PopStyleColor();
     ImGui::PopFont();
     ImGui::EndChild();
 

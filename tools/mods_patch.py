@@ -192,8 +192,9 @@ def write_table(ovl_dir, mods):
 def main():
     args = sys.argv[1:]
     undo = "--revert" in args
-    dirs = [a for a in args if a != "--revert"] or [os.path.join("work", "gen"), os.path.join("work", "gen_ovl")]
-    mods = load_mods()
+    builtin = "--no-builtin" not in args          # the US build: no built-in mods (their addresses are EU's)
+    dirs = [a for a in args if not a.startswith("--")] or [os.path.join("work", "gen"), os.path.join("work", "gen_ovl")]
+    mods = load_mods() if builtin else []
     hooks = [h for m in mods for h in m["hooks"]]
     total = 0
     for d in dirs:
