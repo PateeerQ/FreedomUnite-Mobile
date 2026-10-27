@@ -17,6 +17,7 @@
 #include "adhoc.h"
 #include "hle_mhfu.h"
 #include "lobby.h"
+#include "mods.h"
 #include "overlays.h"
 
 #include "psprecomp/dispatch.h"
@@ -474,6 +475,9 @@ static void check_overlays(void) {
             buf = (uint8_t *)malloc(n);
             if (!buf) return;
             for (uint32_t k = 0; k < n; k++) buf[k] = psp_read8(a + k);
+            /* A mod's hooks left in the code when the game takes the overlay
+             * up again without reloading it (a quest's area change). */
+            mhfu_mods_unhook(a, buf, hashed);
             hash = fnv1a(buf, hashed);
         }
         if (hash == g_ovl_hash[i]) { free(buf); continue; }
