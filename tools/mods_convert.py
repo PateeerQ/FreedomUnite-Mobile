@@ -49,6 +49,11 @@ OVERLAY_CODE = {}
 # Scratch the gathering mod passes to that function: high in memory (a thread's
 # stack on a PSP); here inside the mod's own space instead.
 SCRATCH = {0x09FFF4A0: 0x3E00, 0x09FFF4BE: 0x3E1E}
+# Our changes to a mod, by EU address: (the word the conversion gives, ours, why).
+TWEAKS = {
+    "damage": {0x09E30640: (0x34090012, 0x34090036,
+                            "a number shows for 54 HUD frames, not 18 (0.6 s at 30 fps: too short)")},
+}
 # Loads and stores through a register the game set before the hook: its value there.
 BASES = {0x0891F9FC: 0x08A60000}                  # target cam: v1 = lui 0x08A6 at 0x08869410
 
@@ -288,6 +293,8 @@ def convert(folder, mid, name, desc, delta):
             out[a] = (cmd << 24) | (n & 0xFFFFFF)
         elif 0xA0 <= cmd <= 0xA7 and out.get(a + 0x20, 0) >> 24 == cmd + 8:
             pass                                          # TBP with its TBW 8 words on: handled below
+        elif cmd == 0xB0 and any(out.get(a + 4 * k, 0) >> 24 == 0xB1 for k in range(1, 4)):
+            pass                                          # CBP with its CBW: handled below
         elif own(w):
             out[a] = w + delta
             notes.append(f"{a:08X}: a pointer into the mod")
@@ -300,6 +307,14 @@ def convert(folder, mid, name, desc, delta):
                 if b >> 24 == cmd + 8:
                     t = ((b >> 16) & 0xFF) << 24 | (w & 0xFFFFFF)
                     n = reloc(t)
+                    out[a] = (cmd << 24) | (n & 0xFFFFFF)
+                    out[a + 4 * k] = (b & 0xFF00FFFF) | ((n >> 24) << 16)
+                    break
+        elif cmd == 0xB0:                                  # the CLUT, with CBW (bits 24-31)
+            for k in range(1, 4):
+                b = out.get(a + 4 * k, 0)
+                if b >> 24 == 0xB1:
+                    n = reloc(((b >> 16) & 0xFF) << 24 | (w & 0xFFFFFF))
                     out[a] = (cmd << 24) | (n & 0xFFFFFF)
                     out[a + 4 * k] = (b & 0xFF00FFFF) | ((n >> 24) << 16)
                     break
@@ -418,6 +433,12 @@ def main():
             print(f"mods: no folder for {name} under {src}")
             continue
         m, words = convert(folder[0], mid, name, desc, delta)
+        for at, (was, now, why) in TWEAKS.get(mid, {}).items():
+            k = next(i for i, (wa, _) in enumerate(words) if wa == at)
+            if words[k][1] != was:
+                raise ValueError(f"{mid}: {at:08X} is {words[k][1]:08X}, not {was:08X}: check TWEAKS")
+            words[k] = (at, now)
+            m["notes"].append(f"{at:08X}: {why}")
         h = write_ovl(os.path.join(outdir, mid + ".bin"), mid, m["base"], words)
         m["overlay"] = f"{h:08X}"
         # the original EU words at the hooks (to take a mod out again), and what they are
