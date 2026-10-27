@@ -32,6 +32,9 @@ const char *mhfu_mod_description(int i);
 int  mhfu_mod_on(int i);
 /* On or off at any time (from the window's thread too). */
 void mhfu_mod_set(int i, int on);
+/* The mods write their hooks into overlay code (game_task, game_sub): the
+ * originals back in a copy of an overlay at `base`, so its hash is the game's. */
+void mhfu_mods_unhook(uint32_t base, uint8_t *buf, uint32_t n);
 
 /* Reads <root>/cheats/ULES01213.ini. */
 void mhfu_cheats_init(const char *root);

@@ -70,6 +70,21 @@ static void apply(int i, int on) {
     }
 }
 
+void mhfu_mods_unhook(uint32_t base, uint8_t *buf, uint32_t n) {
+    for (int i = 0; i < mhfu_nbuiltin_mods; i++) {
+        const mhfu_builtin_mod *m = &mhfu_builtin_mods[i];
+        for (int k = 0; k < m->nhooks; k++) {
+            const mhfu_mod_hook *h = &m->hooks[k];
+            if (h->eboot || h->addr < base || h->addr + 4 > base + n || (h->addr & 3)) continue;
+            uint8_t *p = buf + (h->addr - base);
+            const uint32_t w = (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+            if (w != h->word) continue;
+            p[0] = (uint8_t)h->orig; p[1] = (uint8_t)(h->orig >> 8);
+            p[2] = (uint8_t)(h->orig >> 16); p[3] = (uint8_t)(h->orig >> 24);
+        }
+    }
+}
+
 void mhfu_mod_set(int i, int on) {
     if (i < 0 || i >= mhfu_mod_count() || !g_mod_ok[i]) return;
     on = on != 0;
