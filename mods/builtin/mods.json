@@ -38,7 +38,7 @@
    "0891F9FC: through the game's register, EU offset -0x23d6",
    "0891FED8: the hooked instruction, EU form"
   ],
-  "overlay": "4E85E258"
+  "overlay": "A0879446"
  },
  {
   "id": "damage",
@@ -105,8 +105,10 @@
    162298328,
    162957656
   ],
-  "notes": [],
-  "overlay": "63F375B0"
+  "notes": [
+   "09E30640: a number shows for 54 HUD frames, not 18 (0.6 s at 30 fps: too short)"
+  ],
+  "overlay": "409E3CD4"
  },
  {
   "id": "gathering",
@@ -145,6 +147,6 @@
   "notes": [
    "089215E0: the hooked instruction, EU form"
   ],
-  "overlay": "422CBF3B"
+  "overlay": "774570B6"
  }
 ]
